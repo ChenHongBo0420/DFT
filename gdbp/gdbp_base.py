@@ -258,7 +258,7 @@ def train(model: Model,
           batch_size: int = 500,
           n_iter=None,
           optimizer = optax.chain(
-    optax.clip_by_global_norm(1.0),  # 梯度裁剪，限制全局梯度范数
+    # optax.clip_by_global_norm(1.0),  # 梯度裁剪，限制全局梯度范数
     optax.scale_by_adam(),
     optax.scale_by_schedule(optax.exponential_decay(init_value=1e-4, 
                                                     transition_steps=1000, 
