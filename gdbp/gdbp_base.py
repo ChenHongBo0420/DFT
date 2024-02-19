@@ -235,11 +235,11 @@ def update_step(module, optimizer, opt_state, params, module_state, y, x, aux, c
       
     grads_fn = jax.value_and_grad(compute_loss, has_aux=True)
     (loss, new_module_state), grads = grads_fn(params)
-    updates, new_opt_state = optimizer.update(grads, opt_state)
+  
+    updates, new_opt_state = optimizer.update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
   
     return loss, new_opt_state, new_module_state, new_params
-
 
 def get_train_batch(ds: gdat.Input,
                     batchsize: int,
