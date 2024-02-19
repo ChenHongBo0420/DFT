@@ -257,7 +257,12 @@ def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter=None,
-          optimizer=optax.adamw(learning_rate=1e-4, weight_decay=1e-5)):
+          optimizer = optax.chain(
+    optax.clip_by_global_norm(1.0),  # 梯度裁剪，限制全局梯度范数
+    optax.scale_by_adam(),
+    optax.scale_by_schedule(optax.exponential_decay(init_value=1e-4, 
+                                                    transition_steps=1000, 
+                                                    decay_rate=0.9)))):
 
     params, module_state, aux, const, sparams = model.initvar
 
