@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 from typing import Any, Optional, Union
 from . import data as gdat
 import jax
+import optax
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -208,23 +209,36 @@ def loss_fn(module: layer.Layer,
     return contrastive_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
-def update_step(module: layer.Layer,
-                opt: cxopt.Optimizer,
-                i: int,
-                opt_state: tuple,
-                module_state: Dict,
-                y: Array,
-                x: Array,
-                aux: Dict,
-                const: Dict,
-                sparams: Dict):
+# def update_step(module: layer.Layer,
+#                 opt: cxopt.Optimizer,
+#                 i: int,
+#                 opt_state: tuple,
+#                 module_state: Dict,
+#                 y: Array,
+#                 x: Array,
+#                 aux: Dict,
+#                 const: Dict,
+#                 sparams: Dict):
 
-    params = opt.params_fn(opt_state)
-    (loss, module_state), grads = value_and_grad(
-        loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
-                                          aux, const, sparams)
-    opt_state = opt.update_fn(i, grads, opt_state)
-    return loss, opt_state, module_state
+#     params = opt.params_fn(opt_state)
+#     (loss, module_state), grads = value_and_grad(
+#         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
+#                                           aux, const, sparams)
+#     opt_state = opt.update_fn(i, grads, opt_state)
+#     return loss, opt_state, module_state
+
+def update_step(module, optimizer, opt_state, params, module_state, y, x, aux, const, sparams):
+  
+    def compute_loss(params):
+        loss, new_module_state = loss_fn(module, params, module_state, y, x, aux, const, sparams)
+        return loss, new_module_state
+      
+    grads_fn = jax.value_and_grad(compute_loss, has_aux=True)
+    (loss, new_module_state), grads = grads_fn(params)
+    updates, new_opt_state = optimizer.update(grads, opt_state)
+    new_params = optax.apply_updates(params, updates)
+  
+    return loss, new_opt_state, new_module_state, new_params
 
 
 def get_train_batch(ds: gdat.Input,
@@ -239,27 +253,26 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
-
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+          n_iter=None,
+          optimizer=optax.adamw(learning_rate=1e-4, weight_decay=1e-5)):
 
     params, module_state, aux, const, sparams = model.initvar
-    opt_state = opt.init_fn(params)
+
+    opt_state = optimizer.init(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i, (y, x) in tqdm(enumerate(batch_gen),
-                             total=n_iter, desc='training', leave=False):
+    for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter, desc='training', leave=False):
         if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
-                                                   module_state, y, x, aux,
-                                                   const, sparams)
-        yield loss, opt.params_fn(opt_state), module_state
+
+        loss, opt_state, module_state, params = update_step(model.module, optimizer, opt_state, params, module_state, y, x, aux, const, sparams)
+        yield loss, params, module_state
+
 
 
 def test(model: Model,
