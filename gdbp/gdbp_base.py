@@ -217,12 +217,12 @@ def loss_fn(module: layer.Layer,
     y_transformed = apply_transform(y)
     z_transformed, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
-    z1 = latent_sample(z, z_transformed)
-    latent_dim = z1.shape[1] if z1.ndim > 1 else z1.shape[0]
-    z_prior = initialize_z_prior(key, latent_dim)
-    mmd_loss, l2_z_mean, _ = get_mmd_loss_regression(z1, z_prior)
+    # z1 = latent_sample(z, z_transformed)
+    # latent_dim = z1.shape[1] if z1.ndim > 1 else z1.shape[0]
+    # z_prior = initialize_z_prior(key, latent_dim)
+    # mmd_loss, l2_z_mean, _ = get_mmd_loss_regression(z1, z_prior)
     loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
-    loss1 = loss + 0.1 * mmd_loss + 0.1 * l2_z_mean
+    # loss1 = loss + 0.1 * mmd_loss + 0.1 * l2_z_mean
     return loss, updated_state
 
 
