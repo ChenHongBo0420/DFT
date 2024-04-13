@@ -1,4 +1,4 @@
-from jax import numpy as jnp, random, jit, value_and_grad, nn
+from jax import numpy as jnp, random, jit, value_and_grad
 import flax
 from commplax import util, comm, cxopt, op, optim
 from commplax.module import core, layer
@@ -8,8 +8,7 @@ from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union
 from . import data as gdat
-import jax
-import optax
+
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -23,6 +22,22 @@ def make_base_module(steps: int = 3,
                      init_fn: tuple = (core.delta, core.gauss),
                      w0 = 0.,
                      mode: str = 'train'):
+    '''
+    make base module that derives DBP, FDBP, EDBP, GDBP depending on
+    specific initialization method and trainable parameters defined
+    by trainer.
+
+    Args:
+        steps: GDBP steps/layers
+        dtaps: D-filter length
+        ntaps: N-filter length
+        rtaps: R-filter length
+        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
+        mode: 'train' or 'test'
+
+    Returns:
+        A layer object
+    '''
 
     _assert_taps(dtaps, ntaps, rtaps)
 
@@ -66,6 +81,16 @@ def _assert_taps(dtaps, ntaps, rtaps, sps=2):
 def fdbp_init(a: dict,
               xi: float = 1.1,
               steps: Optional[int] = None):
+    '''
+        initializer for the base module
+
+        Args:
+            xi: NLC scaling factor
+            steps: GDBP steps, used to calculate the theoretical profiles of D- and N-filters
+
+        Returns:
+            a pair of functions to initialize D- and N-filters
+    '''
 
     def d_init(key, shape, dtype=jnp.complex64):
         dtaps = shape[0]
@@ -99,6 +124,25 @@ def model_init(data: gdat.Input,
                n_symbols: int = 4000,
                sps : int = 2,
                name='Model'):
+    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
+    depending on given N-filter length and trainable parameters
+
+    Args:
+        data:
+        base_conf: a dict of kwargs to make base module, see `make_base_module`
+        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
+            For example, assume base module has parameters represented as nested dict
+            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
+             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
+             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
+            regexp key is supportted.
+        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
+            memory
+        sps: sample per symbol. Only integer sps is supported now.
+
+    Returns:
+        a initialized model wrapped by a namedtuple
+    '''
     
     mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
@@ -112,72 +156,6 @@ def model_init(data: gdat.Input,
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
-def simclr_contrastive_loss(z1, z2, temperature=0.1, LARGE_NUM=1e9):
-    batch_size = z1.shape[0]
-
-    z1 = l2_normalize(z1, axis=1)
-    z2 = l2_normalize(z2, axis=1)
-
-    representations = jnp.vstack([z1, z2])
-
-    similarity_matrix = jnp.matmul(representations, representations.T) / temperature
-
-    similarity_matrix -= jnp.eye(2 * batch_size) * LARGE_NUM
-
-    positives = jnp.exp(similarity_matrix[:batch_size, batch_size:]) / temperature
-    negatives = jnp.sum(jnp.exp(similarity_matrix[:batch_size, :batch_size]) / temperature, axis=1) + \
-                jnp.sum(jnp.exp(similarity_matrix[:batch_size, batch_size + 1:]) / temperature, axis=1)
-
-    loss = -jnp.log(positives / (positives + negatives))
-    loss = jnp.mean(loss)
-
-    return loss
-
-def l2_normalize(x, axis=None, epsilon=1e-12):
-    square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
-    x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
-    return x / x_inv_norm
-  
-def negative_cosine_similarity(p, z):
-    p = l2_normalize(p, axis=1)
-    z = l2_normalize(z, axis=1)
-    return -jnp.mean(jnp.sum(p * z, axis=1))
-
-def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
-    if np.random.rand() < p:
-        scale = np.random.uniform(scale_range[0], scale_range[1])
-        x = x * scale
-    return x
-  
-def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
-    if np.random.rand() < p:
-        shift = np.random.uniform(shift_range[0], shift_range[1])
-        x = x + shift
-    return x
-
-def apply_transform2(x, mask_range=(0, 30), p=0.5):
-    if np.random.rand() < p:
-        total_length = x.shape[0]
-        mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
-        mask = jnp.array(mask)[:, None]
-        mask = jnp.broadcast_to(mask, x.shape)
-        x = x * mask
-    return x
-
-def apply_transform3(x, range=(0.0, 0.2), p=0.5):
-    if np.random.rand() < p:
-        sigma = np.random.uniform(range[0], range[1])
-        x = x + np.random.normal(0, sigma, x.shape)
-    return x
-  
-def apply_transform4(x, range=(0.5, 30.0), band_width=2.0, sampling_rate=100.0, p=0.5):
-    if np.random.rand() < p:
-        low_freq = np.random.uniform(range[0], range[1])
-        center_freq = low_freq + band_width / 2.0
-        b, a = signal.iirnotch(center_freq, center_freq / band_width, fs=sampling_rate)
-        x = signal.lfilter(b, a, x)
-    return x
-  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -185,67 +163,89 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    y_transformed = apply_transform(y)
-    y_transformed1 = apply_transform1(y)
-   
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
-    z_transformed, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
-    z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
-    
-    # aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    z_original_real = jnp.abs(z_original.val)  
-    z_transformed_real = jnp.abs(z_transformed.val) 
-    z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    contrastive_loss = negative_cosine_similarity(z_transformed_real, z_transformed_real1)
-    # total_loss = mse_loss + 0.1 * contrastive_loss
+            sparams: Dict):
+    ''' loss function
 
-    return contrastive_loss, updated_state
+        Args:
+            module: module returned by `model_init`
+            params: trainable parameters
+            state: module state
+            y: transmitted waveforms
+            x: aligned sent symbols
+            aux: auxiliary input
+            const: contants (internal info generated by model)
+            sparams: static parameters
+
+        Return:
+            loss, updated module state
+    '''
+
+    params = util.dict_merge(params, sparams)
+    z, updated_state = module.apply(
+        {
+            'params': params,
+            'aux_inputs': aux,
+            'const': const,
+            **state
+        }, core.Signal(y))
+    loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
+    return loss, updated_state
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
-# def update_step(module: layer.Layer,
-#                 opt: cxopt.Optimizer,
-#                 i: int,
-#                 opt_state: tuple,
-#                 module_state: Dict,
-#                 y: Array,
-#                 x: Array,
-#                 aux: Dict,
-#                 const: Dict,
-#                 sparams: Dict):
+def update_step(module: layer.Layer,
+                opt: cxopt.Optimizer,
+                i: int,
+                opt_state: tuple,
+                module_state: Dict,
+                y: Array,
+                x: Array,
+                aux: Dict,
+                const: Dict,
+                sparams: Dict):
+    ''' single backprop step
 
-#     params = opt.params_fn(opt_state)
-#     (loss, module_state), grads = value_and_grad(
-#         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
-#                                           aux, const, sparams)
-#     opt_state = opt.update_fn(i, grads, opt_state)
-#     return loss, opt_state, module_state
+        Args:
+            model: model returned by `model_init`
+            opt: optimizer
+            i: iteration counter
+            opt_state: optimizer state
+            module_state: module state
+            y: transmitted waveforms
+            x: aligned sent symbols
+            aux: auxiliary input
+            const: contants (internal info generated by model)
+            sparams: static parameters
 
-def update_step(module, optimizer, opt_state, params, module_state, y, x, aux, const, sparams):
-  
-    def compute_loss(params):
-        loss, new_module_state = loss_fn(module, params, module_state, y, x, aux, const, sparams)
-        return loss, new_module_state
-      
-    grads_fn = jax.value_and_grad(compute_loss, has_aux=True)
-    (loss, new_module_state), grads = grads_fn(params)
-  
-    updates, new_opt_state = optimizer.update(grads, opt_state, params)
-    new_params = optax.apply_updates(params, updates)
-  
-    return loss, new_opt_state, new_module_state, new_params
+        Return:
+            loss, updated module state
+    '''
+
+    params = opt.params_fn(opt_state)
+    (loss, module_state), grads = value_and_grad(
+        loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
+                                          aux, const, sparams)
+    opt_state = opt.update_fn(i, grads, opt_state)
+    return loss, opt_state, module_state
+
 
 def get_train_batch(ds: gdat.Input,
                     batchsize: int,
                     overlaps: int,
                     sps: int = 2):
-                      
+    ''' generate overlapped batch input for training
+
+        Args:
+            ds: dataset
+            batchsize: batch size in symbol unit
+            overlaps: overlaps in symbol unit
+            sps: samples per symbol
+
+        Returns:
+            number of symbols,
+            zipped batched triplet input: (recv, sent, fomul)
+    '''
+
     flen = batchsize + overlaps
     fstep = batchsize
     ds_y = op.frame_gen(ds.y, flen * sps, fstep * sps)
@@ -253,31 +253,38 @@ def get_train_batch(ds: gdat.Input,
     n_batches = op.frame_shape(ds.x.shape, flen, fstep)[0]
     return n_batches, zip(ds_y, ds_x)
 
+
 def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
-          n_iter=None,
-          optimizer = optax.chain(
-    # optax.clip_by_global_norm(1.0),  # 梯度裁剪，限制全局梯度范数
-    optax.scale_by_adam(),
-    optax.scale_by_schedule(optax.exponential_decay(init_value=1e-4, 
-                                                    transition_steps=1000, 
-                                                    decay_rate=0.9)))):
+          n_iter = None,
+          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+    ''' training process (1 epoch)
+
+        Args:
+            model: Model namedtuple return by `model_init`
+            data: dataset
+            batch_size: batch size
+            opt: optimizer
+
+        Returns:
+            yield loss, trained parameters, module state
+    '''
 
     params, module_state, aux, const, sparams = model.initvar
-
-    opt_state = optimizer.init(params)
+    opt_state = opt.init_fn(params)
 
     n_batch, batch_gen = get_train_batch(data, batch_size, model.overlaps)
     n_iter = n_batch if n_iter is None else min(n_iter, n_batch)
 
-    for i, (y, x) in tqdm(enumerate(batch_gen), total=n_iter, desc='training', leave=False):
+    for i, (y, x) in tqdm(enumerate(batch_gen),
+                             total=n_iter, desc='training', leave=False):
         if i >= n_iter: break
         aux = core.dict_replace(aux, {'truth': x})
-
-        loss, opt_state, module_state, params = update_step(model.module, optimizer, opt_state, params, module_state, y, x, aux, const, sparams)
-        yield loss, params, module_state
-
+        loss, opt_state, module_state = update_step(model.module, opt, i, opt_state,
+                                                   module_state, y, x, aux,
+                                                   const, sparams)
+        yield loss, opt.params_fn(opt_state), module_state
 
 
 def test(model: Model,
@@ -285,6 +292,18 @@ def test(model: Model,
          data: gdat.Input,
          eval_range: tuple=(300000, -20000),
          metric_fn=comm.qamqot):
+    ''' testing, a simple forward pass
+
+        Args:
+            model: Model namedtuple return by `model_init`
+        data: dataset
+        eval_range: interval which QoT is evaluated in, assure proper eval of steady-state performance
+        metric_fn: matric function, comm.snrstat for global & local SNR performance, comm.qamqot for
+            BER, Q, SER and more metrics.
+
+        Returns:
+            evaluated matrics and equalized symbols
+    '''
 
     state, aux, const, sparams = model.initvar[1:]
     aux = core.dict_replace(aux, {'truth': data.x})
