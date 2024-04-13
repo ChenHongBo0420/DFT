@@ -175,13 +175,19 @@ def latent_sample(mu, logvar, noise_ratio=0.1, key=random.PRNGKey(0)):
     eps = random.normal(key, mu.shape)
     return eps * std + mu  
   
-def initialize_z_prior(key, latent_dim):
+# def initialize_z_prior(key, latent_dim):
     # Initialize z_prior as a zero-centered Gaussian with a small std deviation
-    mean = jnp.zeros(latent_dim)  # Mean of the Gaussian
-    stddev = jnp.ones(latent_dim)  # Standard deviation of the Gaussian
+    # mean = jnp.zeros(latent_dim)  # Mean of the Gaussian
+    # stddev = jnp.ones(latent_dim)  # Standard deviation of the Gaussian
+    # z_prior = random.normal(key, (latent_dim,)) * stddev + mean
+    # return z_prior
+  
+def initialize_z_prior(key, latent_dim, stddev=0.1):
+    mean = jnp.zeros(latent_dim)
+    stddev = jnp.ones(latent_dim) * stddev 
     z_prior = random.normal(key, (latent_dim,)) * stddev + mean
     return z_prior
-  
+
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
