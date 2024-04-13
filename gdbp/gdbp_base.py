@@ -231,7 +231,7 @@ def loss_fn(module: layer.Layer,
     z_prior = initialize_z_prior(key, latent_dim)
     mmd_loss, l2_z_mean, _ = get_mmd_loss_regression(z1, z_prior)
     loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
-    loss1 = loss + 1e-5 * mmd_loss + 1e-3 * l2_z_mean
+    loss1 = loss + 1e-5 * mmd_loss + 1e-2 * l2_z_mean
     return loss1, updated_state
 
 
