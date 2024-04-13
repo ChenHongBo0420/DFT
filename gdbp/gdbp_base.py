@@ -225,7 +225,8 @@ def loss_fn(module: layer.Layer,
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
     zz = jnp.abs(z.val)
     zz_transformed = jnp.abs(z_transformed.val)
-    z1 = latent_sample(zz, zz_transformed) 
+    # z1 = latent_sample(zz, zz_transformed) 
+    z1 = latent_sample(zz, zz) 
     latent_dim = z1.shape[1] if z1.ndim > 1 else z1.shape[0]
     key = random.PRNGKey(0)
     z_prior = initialize_z_prior(key, latent_dim)
