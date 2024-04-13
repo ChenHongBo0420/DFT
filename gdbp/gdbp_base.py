@@ -8,7 +8,7 @@ from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union
 from . import data as gdat
-
+from jax.scipy.linalg import norm
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -154,8 +154,21 @@ def model_init(data: gdat.Input,
     aux = v0['aux_inputs']
     const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
-
-
+                 
+def get_mmd_loss_regression(z, z_prior):
+  
+    z_mean = jnp.mean(z, axis=0)
+    l2_z_mean = norm(z_mean, ord=2)
+    mmd_loss = jnp.mean((z_mean - z_prior) ** 2) 
+    
+    return mmd_loss, l2_z_mean, z_mean
+  
+def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
+    if np.random.rand() < p:
+        scale = np.random.uniform(scale_range[0], scale_range[1])
+        x = x * scale
+    return x
+  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -188,6 +201,10 @@ def loss_fn(module: layer.Layer,
             'const': const,
             **state
         }, core.Signal(y))
+    y_transformed = apply_transform(y)
+    z_transformed1, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
+
     loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
     return loss, updated_state
 
