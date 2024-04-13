@@ -221,6 +221,7 @@ def loss_fn(module: layer.Layer,
     zz_transformed = jnp.abs(z_transformed.val)
     z1 = latent_sample(zz, zz_transformed) 
     latent_dim = z1.shape[1] if z1.ndim > 1 else z1.shape[0]
+    key = random.PRNGKey(0)
     z_prior = initialize_z_prior(key, latent_dim)
     mmd_loss, l2_z_mean, _ = get_mmd_loss_regression(z1, z_prior)
     loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
