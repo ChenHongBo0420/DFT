@@ -226,7 +226,7 @@ def loss_fn(module: layer.Layer,
     mmd_loss, l2_z_mean, _ = get_mmd_loss_regression(z1, z_prior)
     loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
     loss1 = loss + 0.1 * mmd_loss + 0.1 * l2_z_mean
-    return loss, updated_state
+    return loss1, updated_state
 
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
