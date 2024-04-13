@@ -169,6 +169,19 @@ def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
         x = x * scale
     return x
   
+def latent_sample(mu, logvar, noise_ratio=0.1, key=random.PRNGKey(0)):
+    std = jnp.exp(logvar * noise_ratio)
+    std = jnp.clip(std, a_max=100)
+    eps = random.normal(key, mu.shape)
+    return eps * std + mu  
+  
+def initialize_z_prior(key, latent_dim):
+    # Initialize z_prior as a zero-centered Gaussian with a small std deviation
+    mean = jnp.zeros(latent_dim)  # Mean of the Gaussian
+    stddev = jnp.ones(latent_dim)  # Standard deviation of the Gaussian
+    z_prior = random.normal(key, (latent_dim,)) * stddev + mean
+    return z_prior
+  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -202,10 +215,14 @@ def loss_fn(module: layer.Layer,
             **state
         }, core.Signal(y))
     y_transformed = apply_transform(y)
-    z_transformed1, _ = module.apply(
+    z_transformed, _ = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
-
+    z1 = latent_sample(z, z_transformed)
+    latent_dim = z1.shape[1] if z1.ndim > 1 else z1.shape[0]
+    z_prior = initialize_z_prior(key, latent_dim)
+    mmd_loss, l2_z_mean, _ = get_mmd_loss_regression(z1, z_prior)
     loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
+    loss1 = loss + 0.1 * mmd_loss + 0.1 * l2_z_mean
     return loss, updated_state
 
 
@@ -242,7 +259,7 @@ def update_step(module: layer.Layer,
     (loss, module_state), grads = value_and_grad(
         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
                                           aux, const, sparams)
-    opt_state = opt.update_fn(i, grads, opt_state)
+    opt_state = opt.update_fn(i, grads, opt_state)        
     return loss, opt_state, module_state
 
 
