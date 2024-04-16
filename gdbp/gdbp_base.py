@@ -1,4 +1,4 @@
-from jax import numpy as jnp, random, jit, value_and_grad
+from jax import numpy as jnp, random, jit, value_and_grad, nn
 import flax
 from commplax import util, comm, cxopt, op, optim
 from commplax.module import core, layer
@@ -8,7 +8,9 @@ from collections import namedtuple
 from tqdm.auto import tqdm
 from typing import Any, Optional, Union
 from . import data as gdat
-from jax.numpy.linalg import norm
+import jax
+from scipy import signal
+from flax import linen as nn
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -53,21 +55,29 @@ def make_base_module(steps: int = 3,
     else:
         raise ValueError('invalid mode %s' % mode)
         
-    base = layer.Serial(
-        layer.FDBP(steps=steps,
-                   dtaps=dtaps,
-                   ntaps=ntaps,
-                   d_init=d_init,
-                   n_init=n_init),
+    # base = layer.Serial(
+    #     layer.FDBP(steps=steps,
+    #                dtaps=dtaps,
+    #                ntaps=ntaps,
+    #                d_init=d_init,
+    #                n_init=n_init),
+    #     layer.BatchPowerNorm(mode=mode),
+    #     layer.MIMOFOEAf(name='FOEAf',
+    #                     w0=w0,
+    #                     train=mimo_train,
+    #                     preslicer=core.conv1d_slicer(rtaps),
+    #                     foekwargs={}),
+    #     layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+    #     layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+    base_layers = [
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf',
-                        w0=w0,
-                        train=mimo_train,
-                        preslicer=core.conv1d_slicer(rtaps),
-                        foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-        layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
-        
+        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train)
+    ]
+      
+    base = layer.Serial(*base_layers)
     return base
 
 
@@ -154,39 +164,87 @@ def model_init(data: gdat.Input,
     aux = v0['aux_inputs']
     const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
-                 
-def get_mmd_loss_regression(z, z_prior):
+
+
+def simclr_contrastive_loss(z1, z2, temperature=0.1, LARGE_NUM=1e9):
+    batch_size = z1.shape[0]
+
+    z1 = l2_normalize(z1, axis=1)
+    z2 = l2_normalize(z2, axis=1)
+
+    representations = jnp.vstack([z1, z2])
+
+    similarity_matrix = jnp.matmul(representations, representations.T) / temperature
+
+    similarity_matrix -= jnp.eye(2 * batch_size) * LARGE_NUM
+
+    positives = jnp.exp(similarity_matrix[:batch_size, batch_size:]) / temperature
+    negatives = jnp.sum(jnp.exp(similarity_matrix[:batch_size, :batch_size]) / temperature, axis=1) + \
+                jnp.sum(jnp.exp(similarity_matrix[:batch_size, batch_size + 1:]) / temperature, axis=1)
+
+    loss = -jnp.log(positives / (positives + negatives))
+    loss = jnp.mean(loss)
+
+    return loss
+
+def l2_normalize(x, axis=None, epsilon=1e-12):
+    square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
+    x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
+    return x / x_inv_norm
   
-    z_mean = jnp.mean(z, axis=0)
-    l2_z_mean = norm(z_mean, ord=2)
-    mmd_loss = jnp.mean((z_mean - z_prior) ** 2) 
-    
-    return mmd_loss, l2_z_mean, z_mean
+def negative_cosine_similarity(p, z):
+    p = l2_normalize(p, axis=1)
+    z = l2_normalize(z, axis=1)
+    return -jnp.mean(jnp.sum(p * z, axis=1))
   
+#scale-1
 def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
     if np.random.rand() < p:
         scale = np.random.uniform(scale_range[0], scale_range[1])
         x = x * scale
     return x
   
-def latent_sample(mu, logvar, noise_ratio=0.1, key=random.PRNGKey(0)):
-    std = jnp.exp(logvar * noise_ratio)
-    std = jnp.clip(std, a_max=100)
-    eps = random.normal(key, mu.shape)
-    return eps * std + mu  
+# shift-2  
+def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
+    if np.random.rand() < p:
+        shift = np.random.uniform(shift_range[0], shift_range[1])
+        x = x + shift
+    return x
   
-# def initialize_z_prior(key, latent_dim):
-    # Initialize z_prior as a zero-centered Gaussian with a small std deviation
-    # mean = jnp.zeros(latent_dim)  # Mean of the Gaussian
-    # stddev = jnp.ones(latent_dim)  # Standard deviation of the Gaussian
-    # z_prior = random.normal(key, (latent_dim,)) * stddev + mean
-    # return z_prior
+# mask-3
+# def apply_transform2(x, range=(0, 300), p=0.5):
+#     if np.random.rand() < p:
+#         mask_len = int(np.random.uniform(range[0], range[1]))
+#         start = int(np.random.uniform(0, len(x) - mask_len))
+#         mask = jnp.ones_like(x)
+#         mask = mask.at[start:start + mask_len].set(0)
+#         x = x * mask
+#     return x
+
+# def apply_transform2(x, p=0.5):
+#     if np.random.rand() < p:
+#         total_length = x.shape[0]
+#         mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
+#         mask = jnp.array(mask)
+#         x = x * mask
+#     return x
+
+def apply_transform2(x, mask_range=(0, 30), p=0.5):
+    if np.random.rand() < p:
+        total_length = x.shape[0]
+        mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
+        mask = jnp.array(mask)[:, None]
+        mask = jnp.broadcast_to(mask, x.shape)
+        x = x * mask
+    return x
   
-def initialize_z_prior(key, latent_dim, stddev=0.1):
-    mean = jnp.zeros(latent_dim)
-    stddev = jnp.ones(latent_dim) * stddev 
-    z_prior = random.normal(key, (latent_dim,)) * stddev + mean
-    return z_prior
+# random-4
+def apply_transform3(x, range=(0.0, 0.2), p=0.5):
+    if np.random.rand() < p:
+        sigma = np.random.uniform(range[0], range[1])
+        x = x + np.random.normal(0, sigma, x.shape)
+    return x
+  
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -195,45 +253,28 @@ def loss_fn(module: layer.Layer,
             x: Array,
             aux: Dict,
             const: Dict,
-            sparams: Dict):
-    ''' loss function
-
-        Args:
-            module: module returned by `model_init`
-            params: trainable parameters
-            state: module state
-            y: transmitted waveforms
-            x: aligned sent symbols
-            aux: auxiliary input
-            const: contants (internal info generated by model)
-            sparams: static parameters
-
-        Return:
-            loss, updated module state
-    '''
-
+            sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    z, updated_state = module.apply(
-        {
-            'params': params,
-            'aux_inputs': aux,
-            'const': const,
-            **state
-        }, core.Signal(y))
-    y_transformed = apply_transform(y)
-    z_transformed, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
-    zz = jnp.abs(z.val)
-    zz_transformed = jnp.abs(z_transformed.val)
-    z1 = latent_sample(zz, zz_transformed) 
-    latent_dim = z1.shape[1] if z1.ndim > 1 else z1.shape[0]
-    key = random.PRNGKey(0)
-    z_prior = initialize_z_prior(key, latent_dim)
-    mmd_loss, l2_z_mean, _ = get_mmd_loss_regression(z1, z_prior)
-    loss = jnp.mean(jnp.abs(z.val - x[z.t.start:z.t.stop])**2)
-    loss1 = loss + 1e-5 * mmd_loss + 1e-2 * l2_z_mean
-    return loss1, updated_state
+    # y_transformed = apply_transform(y)
+    y_transformed1 = apply_transform(y)
+   
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
+    z_transformed1, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
+    
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    z_original_real = jnp.abs(z_original.val)   
+    z_transformed_real1 = jnp.abs(z_transformed1.val) 
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
+    aligned_y = x[0:500]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)     
+    # mmse_loss = jnp.mean(jnp.abs(aligned_y - z_transformed1_real1))   
+    total_loss = mse_loss + contrastive_loss
 
+    return mse_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
@@ -268,7 +309,7 @@ def update_step(module: layer.Layer,
     (loss, module_state), grads = value_and_grad(
         loss_fn, argnums=1, has_aux=True)(module, params, module_state, y, x,
                                           aux, const, sparams)
-    opt_state = opt.update_fn(i, grads, opt_state)        
+    opt_state = opt.update_fn(i, grads, opt_state)
     return loss, opt_state, module_state
 
 
@@ -301,7 +342,7 @@ def train(model: Model,
           data: gdat.Input,
           batch_size: int = 500,
           n_iter = None,
-          opt: optim.Optimizer = optim.adam(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
+          opt: optim.Optimizer = optim.sgd(optim.piecewise_constant([500, 1000], [1e-4, 1e-5, 1e-6]))):
     ''' training process (1 epoch)
 
         Args:
