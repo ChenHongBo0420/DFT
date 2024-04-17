@@ -286,8 +286,8 @@ def loss_fn(module: layer.Layer,
     prototypes = initialize_prototypes(z_original_real, num_prototypes, key)
     scores_original = jnp.matmul(z_original_real, prototypes.T) / 0.1
     scores_transformed = jnp.matmul(z_transformed_real, prototypes.T) / 0.1         
-    assignments_original = sinkhorn_knopp(scores_original, temperature, sinkhorn_iterations=3)
-    assignments_transformed = sinkhorn_knopp(scores_transformed, temperature, sinkhorn_iterations=3)             
+    assignments_original = sinkhorn_knopp(scores_original, 0.1, sinkhorn_iterations=3)
+    assignments_transformed = sinkhorn_knopp(scores_transformed, 0.1, sinkhorn_iterations=3)             
     loss_original = swav_loss(assignments_original, cores_original)
     loss_transformed = swav_loss(assignments_transformed, scores_transformed)
     swav_loss = (loss_original + loss_transformed) / 2.0
