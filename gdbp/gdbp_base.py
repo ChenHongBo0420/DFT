@@ -54,21 +54,7 @@ def make_base_module(steps: int = 3,
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-        
-    # base = layer.Serial(
-    #     layer.FDBP(steps=steps,
-    #                dtaps=dtaps,
-    #                ntaps=ntaps,
-    #                d_init=d_init,
-    #                n_init=n_init),
-    #     layer.BatchPowerNorm(mode=mode),
-    #     layer.MIMOFOEAf(name='FOEAf',
-    #                     w0=w0,
-    #                     train=mimo_train,
-    #                     preslicer=core.conv1d_slicer(rtaps),
-    #                     foekwargs={}),
-    #     layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
-    #     layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
+      
     base_layers = [
         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
@@ -245,6 +231,36 @@ def apply_transform3(x, range=(0.0, 0.2), p=0.5):
         x = x + np.random.normal(0, sigma, x.shape)
     return x
   
+def sinkhorn_knopp(scores, eps, n_iters):
+    Q = jnp.exp(scores / eps).T      
+    Q /= lax.stop_gradient(Q.sum(axis=1, keepdims=True))
+    for _ in range(n_iters):
+        Q /= lax.stop_gradient(Q.sum(axis=1, keepdims=True))
+        Q /= lax.stop_gradient(Q.sum(axis=0, keepdims=True))
+
+    return Q.T
+  
+def compute_similarity(z, prototypes):
+    z_norm = l2_normalize(z, axis=1)
+    prototypes_norm = l2_normalize(prototypes, axis=1)
+    similarity = jnp.matmul(z_norm, prototypes_norm.T)
+    return similarity 
+  
+def log_softmax(scores, axis=1):
+    scores -= jnp.max(scores, axis=axis, keepdims=True)
+    exp_scores = jnp.exp(scores)
+    sum_exp_scores = jnp.sum(exp_scores, axis=axis, keepdims=True)
+    log_probs = scores - jnp.log(sum_exp_scores)
+    return log_probs
+
+def swav_loss(assignments, scores):
+    log_probs = log_softmax(scores, axis=1)
+    loss = -jnp.mean(jnp.sum(assignments * log_probs, axis=1))
+    return loss
+  
+def initialize_prototypes(z_original_real, num_prototypes, key):
+    indices = random.choice(key, z_original_real.shape[0], shape=(num_prototypes,), replace=False)
+    return z_original_real[indices]
 
 def loss_fn(module: layer.Layer,
             params: Dict,
@@ -255,26 +271,28 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    # y_transformed = apply_transform(y)
-    y_transformed1 = apply_transform(y)
+    y_transformed = apply_transform(y)
    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
-    z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
-    
-    aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    z_transformed, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
+    # aligned_x = x[z_original.t.start:z_original.t.stop]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
-    z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed_real1)
-    aligned_y = x[0:500]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)     
-    # mmse_loss = jnp.mean(jnp.abs(aligned_y - z_transformed1_real1))   
-    total_loss = mse_loss + contrastive_loss
-
-    return mse_loss, updated_state
+    z_transformed_real = jnp.abs(z_transformed.val) 
+    key = random.PRNGKey(0)
+    num_prototypes = 300 
+    feat_dim = z_transformed.shape[1]   
+    prototypes = initialize_prototypes(z_original_real, num_prototypes, key)
+    cores_original = jnp.matmul(z_original_real, prototypes.T) / 0.1
+    scores_transformed = jnp.matmul(z_transformed_real, prototypes.T) / 0.1
+    assignments_original = sinkhorn_knopp(scores_original, temperature, sinkhorn_iterations=3)
+    assignments_transformed = sinkhorn_knopp(scores_transformed, temperature, sinkhorn_iterations=3)          
+    loss_original = swav_loss(assignments_original, cores_original)
+    loss_transformed = swav_loss(assignments_transformed, scores_transformed)
+    swav_loss = (loss_original + loss_transformed) / 2.0
+    return swav_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
