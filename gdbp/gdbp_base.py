@@ -288,8 +288,8 @@ def loss_fn(module: layer.Layer,
     assignments_transformed = sinkhorn_knopp(scores_transformed, 0.1, 3)           
     loss_original = swav_loss(assignments_original, scores_original)
     loss_transformed = swav_loss(assignments_transformed, scores_transformed)
-    swav_loss = (loss_original + loss_transformed) / 2.0
-    return swav_loss, updated_state
+    total_swav_loss = (loss_original + loss_transformed) / 2.0
+    return total_swav_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
