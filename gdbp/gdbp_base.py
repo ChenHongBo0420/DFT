@@ -283,7 +283,6 @@ def loss_fn(module: layer.Layer,
     z_transformed_real = jnp.abs(z_transformed.val) 
     key = random.PRNGKey(0)
     num_prototypes = 300 
-    feat_dim = z_transformed.shape[1]   
     prototypes = initialize_prototypes(z_original_real, num_prototypes, key)
     cores_original = jnp.matmul(z_original_real, prototypes.T) / 0.1
     scores_transformed = jnp.matmul(z_transformed_real, prototypes.T) / 0.1
