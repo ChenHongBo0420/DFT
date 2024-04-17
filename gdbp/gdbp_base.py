@@ -11,7 +11,7 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-
+from jax import lax
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
@@ -233,10 +233,9 @@ def apply_transform3(x, range=(0.0, 0.2), p=0.5):
   
 def sinkhorn_knopp(scores, eps, n_iters=3):
     Q = jnp.exp(scores / eps).T      
-    Q /= lax.stop_gradient(Q.sum(axis=1, keepdims=True))
     for _ in range(n_iters):
-        Q /= lax.stop_gradient(Q.sum(axis=1, keepdims=True))
-        Q /= lax.stop_gradient(Q.sum(axis=0, keepdims=True))
+        Q /= jax.lax.stop_gradient(Q.sum(axis=1, keepdims=True) + 1e-8)
+        Q /= jax.lax.stop_gradient(Q.sum(axis=0, keepdims=True) + 1e-8)
     return Q.T
   
 def compute_similarity(z, prototypes):
