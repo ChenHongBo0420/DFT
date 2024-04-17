@@ -287,7 +287,7 @@ def loss_fn(module: layer.Layer,
     scores_transformed = jnp.matmul(z_transformed_real, prototypes.T) / 0.1         
     assignments_original = sinkhorn_knopp(scores_original, 0.1, 3)
     assignments_transformed = sinkhorn_knopp(scores_transformed, 0.1, 3)           
-    loss_original = swav_loss(assignments_original, cores_original)
+    loss_original = swav_loss(assignments_original, scores_original)
     loss_transformed = swav_loss(assignments_transformed, scores_transformed)
     swav_loss = (loss_original + loss_transformed) / 2.0
     return swav_loss, updated_state
