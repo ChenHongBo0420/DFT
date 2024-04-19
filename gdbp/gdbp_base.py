@@ -11,7 +11,9 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-from jax import lax
+import distrax
+from distrax import MixtureSameFamily, Categorical, Normal
+
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
@@ -54,12 +56,26 @@ def make_base_module(steps: int = 3,
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-      
+        
+    # base = layer.Serial(
+    #     layer.FDBP(steps=steps,
+    #                dtaps=dtaps,
+    #                ntaps=ntaps,
+    #                d_init=d_init,
+    #                n_init=n_init),
+    #     layer.BatchPowerNorm(mode=mode),
+    #     layer.MIMOFOEAf(name='FOEAf',
+    #                     w0=w0,
+    #                     train=mimo_train,
+    #                     preslicer=core.conv1d_slicer(rtaps),
+    #                     foekwargs={}),
+    #     layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),  # vectorize column-wise Conv1D
+    #     layer.MIMOAF(train=mimo_train))  # adaptive MIMO layer
     base_layers = [
         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
         layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.vmap(layer.Conv1d1)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
     ]
       
@@ -231,35 +247,33 @@ def apply_transform3(x, range=(0.0, 0.2), p=0.5):
         x = x + np.random.normal(0, sigma, x.shape)
     return x
   
-def sinkhorn_knopp(scores, eps, n_iters=3):
-    Q = jnp.exp(scores / eps).T      
-    for _ in range(n_iters):
-        Q /= jax.lax.stop_gradient(Q.sum(axis=1, keepdims=True) + 1e-8)
-        Q /= jax.lax.stop_gradient(Q.sum(axis=0, keepdims=True) + 1e-8)
-    return Q.T
-  
-def compute_similarity(z, prototypes):
-    z_norm = l2_normalize(z, axis=1)
-    prototypes_norm = l2_normalize(prototypes, axis=1)
-    similarity = jnp.matmul(z_norm, prototypes_norm.T)
-    return similarity 
-  
-def log_softmax(scores, axis=1):
-    scores -= jnp.max(scores, axis=axis, keepdims=True)
-    exp_scores = jnp.exp(scores)
-    sum_exp_scores = jnp.sum(exp_scores, axis=axis, keepdims=True)
-    log_probs = scores - jnp.log(sum_exp_scores)
-    return log_probs
+def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0), shift_range1=(-100, 100), mask_range=(0, 30), noise_range=(0.0, 0.2), p_scale=0.5, p_shift=0.5, p_mask=0.5, p_noise=0.5, p=0.5):
+    if np.random.rand() < p_scale:
+        scale = np.random.uniform(scale_range[0], scale_range[1])
+        x = x * scale
 
-def swav_loss(assignments, scores):
-    log_probs = log_softmax(scores, axis=1)
-    loss = -jnp.mean(jnp.sum(assignments * log_probs, axis=1))
-    return loss
-  
-def initialize_prototypes(z_original_real, num_prototypes, key):
-    indices = random.choice(key, z_original_real.shape[0], shape=(num_prototypes,), replace=False)
-    return z_original_real[indices]
+    if np.random.rand() < p_shift:
+        shift = np.random.uniform(shift_range[0], shift_range[1])
+        x = x + shift
 
+    if np.random.rand() < p_mask:
+        total_length = x.shape[0]
+        mask = np.random.choice([0, 1], size=total_length, p=[1-p_mask, p_mask])
+        mask = jnp.array(mask)[:, None]
+        mask = jnp.broadcast_to(mask, x.shape)
+        x = x * mask
+
+    if np.random.rand() < p_noise:
+        sigma = np.random.uniform(noise_range[0], noise_range[1])
+        noise = np.random.normal(0, sigma, x.shape)
+        x = x + noise
+
+    if np.random.rand() < p:
+        t_shift = np.random.randint(shift_range1[0], shift_range1[1])
+        x = jnp.roll(x, shift=t_shift)
+    return x
+  
+  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -269,27 +283,23 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    y_transformed = apply_transform(y)
+    # y_transformed = apply_transform(y)
+    y_transformed1 = apply_combined_transform(y)
    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
-    z_transformed, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed))
+    z_transformed1, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
+ 
     # aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     z_original_real = jnp.abs(z_original.val)   
-    z_transformed_real = jnp.abs(z_transformed.val) 
-    key = random.PRNGKey(0)
-    num_prototypes = 300 
-    prototypes = initialize_prototypes(z_original_real, num_prototypes, key)
-    scores_original = jnp.matmul(z_original_real, prototypes.T) / 0.1
-    scores_transformed = jnp.matmul(z_transformed_real, prototypes.T) / 0.1         
-    assignments_original = sinkhorn_knopp(scores_original, 0.1, 3)
-    assignments_transformed = sinkhorn_knopp(scores_transformed, 0.1, 3)           
-    loss_original = swav_loss(assignments_original, scores_original)
-    loss_transformed = swav_loss(assignments_transformed, scores_transformed)
-    total_swav_loss = (loss_original + loss_transformed) / 2.0
-    return total_swav_loss, updated_state
+    z_transformed_real1 = jnp.abs(z_transformed1.val) 
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
+    # total_loss = mse_loss + contrastive_loss
+
+    return contrastive_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
