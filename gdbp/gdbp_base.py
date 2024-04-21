@@ -298,7 +298,8 @@ def loss_fn(module: layer.Layer, params: Dict, state: Dict, y: Array, x: Array, 
     beta2 = -21.27e-3  # [ps^2/km]
     gamma = 1.2  # [W^-1km^-1]
 
-    nlse_res = nlse_residual(z_original_real, dz, dt, beta2, gamma)
+    # nlse_res = nlse_residual(z_original_real, dz, dt, beta2, gamma)
+    nlse_res = nlse_residual(z_original, dz, dt, beta2, gamma)
     nlse_loss = jnp.mean(jnp.abs(nlse_res)**2)
 
     contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
