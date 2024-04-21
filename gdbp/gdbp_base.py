@@ -272,24 +272,32 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
     return x
   
   
+def check_for_nans(data, name="Variable"):
+    if jnp.any(jnp.isnan(data)):
+        print(f"NaN detected in {name}")
+    else:
+        print(f"No NaN in {name}")
+
 def nlse_residual(z, dz, dt, beta2, gamma):
     # 计算时间导数
     z_t = jnp.gradient(z, axis=-1) / dt
-    print("z_t:", z_t)
+    check_for_nans(z_t, "z_t")
+
     z_tt = jnp.gradient(z_t, axis=-1) / dt
-    print("z_tt:", z_tt)
+    check_for_nans(z_tt, "z_tt")
 
     # 计算空间导数
     z_z = jnp.gradient(z, axis=-2) / dz
-    print("z_z:", z_z)
+    check_for_nans(z_z, "z_z")
 
     # 计算非线性项所需的 |z|^2
     z_squared = jnp.abs(z)**2
-    print("z_squared:", z_squared)
+    check_for_nans(z_squared, "z_squared")
 
     # 计算NLSE的残差
     residual = 1j * z_z + beta2 / 2 * z_tt + gamma * z_squared * z
-    print("residual:", residual)
+    check_for_nans(residual, "residual")
+
     return residual
 
 
