@@ -273,11 +273,15 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
   
   
 def nlse_residual(z, dz, dt, beta2, gamma):
-    z_t = jnp.gradient(z, axis=-1) / dt  # 时间导数
-    z_tt = jnp.gradient(z_t, axis=-1) / dt  # 时间的二阶导数
-    z_z = jnp.gradient(z, axis=-2) / dz  # 传播方向的导数
+    z_t = jnp.gradient(z, axis=-1) / dt
+    print("z_t:", z_t)
+    z_tt = jnp.gradient(z_t, axis=-1) / dt
+    print("z_tt:", z_tt)
+    z_z = jnp.gradient(z, axis=-2) / dz
+    print("z_z:", z_z)
 
-    residual = 1j * z_z + beta2 / 2 * z_tt + gamma * jnp.abs(z)**2 * z
+    residual = 1j * z_z + beta2 / 2 * z_tt + gamma * z_squared * z
+    print("residual:", residual)
     return residual
 
 def loss_fn(module: layer.Layer, params: Dict, state: Dict, y: Array, x: Array, aux: Dict, const: Dict, sparams: Dict):
