@@ -272,32 +272,39 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
     return x
   
   
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
+def nlse_residual(z, dz, dt, beta2, gamma):
+    z_t = jnp.gradient(z, axis=-1, edge_order=2) / dt  # 时间导数
+    z_tt = jnp.gradient(z_t, axis=-1, edge_order=2) / dt  # 时间的二阶导数
+    z_z = jnp.gradient(z, axis=-2, edge_order=2) / dz  # 传播方向的导数
+    residual = 1j * z_z + beta2 / 2 * z_tt + gamma * jnp.abs(z)**2 * z
+    return residual
+
+def loss_fn(module: layer.Layer, params: Dict, state: Dict, y: Array, x: Array, aux: Dict, const: Dict, sparams: Dict):
     params = util.dict_merge(params, sparams)
-    # y_transformed = apply_transform(y)
     y_transformed1 = apply_combined_transform(y)
-   
+
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
- 
-    # aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    z_original_real = jnp.abs(z_original.val)   
-    z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
-    # total_loss = mse_loss + contrastive_loss
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
 
-    return contrastive_loss, updated_state
+    z_original_real = jnp.abs(z_original.val)
+    z_transformed_real1 = jnp.abs(z_transformed1.val)
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    
+    dz = 75000 
+    dt = 1 / (112e9)  # 112 GSa/s
+    beta2 = -21.27e-3  # [ps^2/km]
+    gamma = 1.2  # [W^-1km^-1]
+
+    nlse_res = nlse_residual(z_original_real, dz, dt, beta2, gamma)
+    nlse_loss = jnp.mean(jnp.abs(nlse_res)**2)
+
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
+    total_loss = nlse_loss + contrastive_loss
+    
+    return total_loss, updated_state
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
