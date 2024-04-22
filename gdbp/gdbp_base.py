@@ -295,11 +295,23 @@ def get_mixup_sample_rate(y_list, bandwidth=1.0):
     density /= density.sum()
     return jnp.tile(density, (y_list.shape[0], 1))
   
-def get_mixup_sample_rate_simple(y_list, bins=100):
-    hist, bin_edges = np.histogram(y_list, bins=bins, density=True)
+def jax_histogram(data, bins=10, range=None, density=False):
+    if range is None:
+        range = (jnp.min(data), jnp.max(data))
+    bin_edges = jnp.linspace(range[0], range[1], bins + 1)
+    bin_indices = jnp.digitize(data, bin_edges, right=True)
+    bin_counts = jnp.zeros(bins)
+    for i in range(1, bins + 1):
+        bin_counts = bin_counts.at[i-1].set(jnp.sum(bin_indices == i))
+    if density:
+        bin_counts = bin_counts / (jnp.sum(bin_counts) * (bin_edges[1] - bin_edges[0]))
+    return bin_counts, bin_edges
+
+def get_mixup_sample_rate_jax(y_list, bins=100):
+    hist, bin_edges = jax_histogram(y_list.flatten(), bins=bins, density=True)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    probabilities = np.interp(y_list, bin_centers, hist)
-    probabilities /= probabilities.sum()  # Normalize to form a probability distribution
+    probabilities = jnp.interp(y_list.flatten(), bin_centers, hist)
+    probabilities /= probabilities.sum()
     return probabilities
 
   
