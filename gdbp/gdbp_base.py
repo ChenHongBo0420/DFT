@@ -351,7 +351,7 @@ def loss_fn(module: layer.Layer,
     y_values = z_original.val.reshape(-1, 1)  
     aligned_x = x[z_original.t.start:z_original.t.stop] 
     # mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.1)
-    mix_idx = get_mixup_sample_rate_simple(y_values)
+    mix_idx = get_mixup_sample_rate_jax(y_values)
     mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=0.2, key=key)
     mixed_y = mixed_y.reshape(-1, 2)
     mmse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
