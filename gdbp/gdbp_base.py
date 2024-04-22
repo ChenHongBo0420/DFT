@@ -308,10 +308,12 @@ def jax_histogram(data, bins=10, bin_range=None, density=False):
     return bin_counts, bin_edges
 
 def get_mixup_sample_rate_jax(y_list, bins=100):
-    hist, bin_edges = jax_histogram(y_list.flatten(), bins=bins, density=True)
+    # 使用绝对值处理复数数据
+    abs_y_list = jnp.abs(y_list.flatten())
+    hist, bin_edges = jax_histogram(abs_y_list, bins=bins, density=True)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    probabilities = jnp.interp(y_list.flatten(), bin_centers, hist)
-    probabilities /= probabilities.sum()
+    probabilities = jnp.interp(abs_y_list, bin_centers, hist)
+    probabilities /= probabilities.sum()  # Normalize to form a probability distribution
     return probabilities
 
   
