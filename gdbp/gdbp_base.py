@@ -272,37 +272,57 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
     return x
   
   
-def loss_fn(module: layer.Layer,
-            params: Dict,
-            state: Dict,
-            y: Array,
-            x: Array,
-            aux: Dict,
-            const: Dict,
-            sparams: Dict,):
-    params = util.dict_merge(params, sparams)
-    # y_transformed = apply_transform(y)
-    y_transformed1 = apply_combined_transform(y)
+def loss_fn_dino(student_module: layer.Layer,
+                 teacher_module: layer.Layer,
+                 student_params: Dict,
+                 teacher_params: Dict,
+                 state: Dict,
+                 data: Array,
+                 aux: Dict,
+                 const: Dict,
+                 sparams: Dict,
+                 tpt: float,
+                 tps: float):
+    # 合并静态参数和传入的模型参数
+    student_params = util.dict_merge(student_params, sparams)
+    teacher_params = util.dict_merge(teacher_params, sparams)
     
-    z_original, updated_state = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
-    z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
+    # 为输入数据生成两个随机的增强版本
+    data_aug1 = apply_combined_transform(data)
+    data_aug2 = apply_combined_transform(data)
+    
+    # 学生模型的前向传播
+    student_out1, updated_state = student_module.apply(
+        {'params': student_params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(data_aug1))
+    student_out2, _ = student_module.apply(
+        {'params': student_params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(data_aug2))
+    
+    # 教师模型的前向传播（不需要梯度）
+    with jax.lax.stop_gradient():
+        teacher_out1 = teacher_module.apply(
+            {'params': teacher_params, 'aux_inputs': aux, 'const': const}, core.Signal(data_aug1))
+        teacher_out2 = teacher_module.apply(
+            {'params': teacher_params, 'aux_inputs': aux, 'const': const}, core.Signal(data_aug2))
+    
+    # 计算损失函数，这里我们使用cross-entropy损失的一种形式
+    # 这里t和s是softmax之后的输出
+    loss = 0
+    for student_out, teacher_out in zip([student_out1, student_out2], [teacher_out1, teacher_out2]):
+        # 通过教师输出计算目标概率分布
+        teacher_out_probs = jax.nn.softmax(teacher_out.val / tpt, axis=-1)
+        
+        # 学生输出也进行softmax
+        student_out_probs = jax.nn.softmax(student_out.val / tps, axis=-1)
+        
+        # 计算每个增强版本的cross-entropy损失
+        loss += -jnp.mean(jnp.sum(teacher_out_probs * jnp.log(student_out_probs + 1e-6), axis=-1))
 
-    # aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-         
-    # feature_1 = z_original.val[:, 0]
-    # feature_2 = z_original.val[:, 1]
-    
-    z_original_real = jnp.abs(z_original.val)
-    z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    # mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
-    # total_loss = mse_loss + contrastive_loss
-              
-    return contrastive_loss, updated_state
+    # 平均两个损失
+    loss /= 2
+
+    return loss, updated_state
+
+
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
