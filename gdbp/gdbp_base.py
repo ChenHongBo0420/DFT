@@ -323,14 +323,20 @@ def mixup_data(x, y, mix_idx, alpha, key):
     mixed_y = jnp.zeros_like(y)
     keys = random.split(key, batch_size) 
 
+    if mix_idx.size == 0:
+        raise ValueError("mix_idx is empty. Check your mix_idx calculation.")
+
     for i in range(batch_size):
+        print(f"mix_idx[{i}]:", mix_idx[i])  # Debugging output
         logits = jnp.log(mix_idx[i]).astype(jnp.float32)
+        print(f"logits[{i}]:", logits)  # Debugging output
         j = random.categorical(keys[i], logits)
         lam = random.beta(keys[i], alpha, alpha)
         mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
         mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
 
     return mixed_x, mixed_y
+
 
   
 def loss_fn(module: layer.Layer,
