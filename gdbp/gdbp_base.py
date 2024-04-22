@@ -294,6 +294,13 @@ def get_mixup_sample_rate(y_list, bandwidth=1.0):
     density = evaluate_density(mixture_model, y_list)
     density /= density.sum()
     return jnp.tile(density, (y_list.shape[0], 1))
+  
+def get_mixup_sample_rate_simple(y_list, bins=100):
+    hist, bin_edges = np.histogram(y_list, bins=bins, density=True)
+    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+    probabilities = np.interp(y_list, bin_centers, hist)
+    probabilities /= probabilities.sum()  # Normalize to form a probability distribution
+    return probabilities
 
   
 def mixup_data(x, y, mix_idx, alpha, key):
@@ -332,16 +339,17 @@ def loss_fn(module: layer.Layer,
     y_values = z_original.val.reshape(-1, 1)  
     aligned_x = x[z_original.t.start:z_original.t.stop] 
     mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.5)
-    mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=1.0, key=key)
-    mixed_y = mixed_y.reshape(-1, 2)
-    mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
+    # mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=1.0, key=key)
+    # mixed_y = mixed_y.reshape(-1, 2)
+    # mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
               
-    # aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-    z_original_real = jnp.abs(z_original.val)   
-    z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+              
+    # z_original_real = jnp.abs(z_original.val)   
+    # z_transformed_real1 = jnp.abs(z_transformed1.val) 
+    # z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    # contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
     # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)   
     # total_loss = mse_loss + contrastive_loss
 
