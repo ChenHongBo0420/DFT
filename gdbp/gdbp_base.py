@@ -11,6 +11,8 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
+import distrax
+from distrax import MixtureSameFamily, Categorical, Normal
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -271,58 +273,79 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
+def gaussian_mixture_kde(data, bandwidth):
+    num_components = data.shape[0]
+    mixture_distribution = Categorical(probs=jnp.ones(num_components) / num_components)
+    component_distribution = Normal(loc=data.flatten(), scale=jnp.full(data.shape[0], fill_value=bandwidth))
+    mixture_model = MixtureSameFamily(mixture_distribution, component_distribution)
+    return mixture_model
+
+def evaluate_density(mixture_model, points):
+    points = points.flatten()
+    log_probs = mixture_model.log_prob(points)
+    probs = jnp.exp(log_probs)
+    return probs
+
+
+def get_mixup_sample_rate(y_list, bandwidth=1.0):
+    y_list = jnp.array(y_list)
+    y_list = jnp.abs(y_list)
+    mixture_model = gaussian_mixture_kde(y_list, bandwidth)
+    density = evaluate_density(mixture_model, y_list)
+    density /= density.sum()
+    return jnp.tile(density, (y_list.shape[0], 1))
+
   
-def loss_fn(student_module: layer.Layer,
-                 teacher_module: layer.Layer,
-                 student_params: Dict,
-                 teacher_params: Dict,
-                 state: Dict,
-                 data: Array,
-                 aux: Dict,
-                 const: Dict):
-    # 固定的sparams, tpt和tps数值
-    sparams = {}  # 如果需要静态参数，可以在这里定义
-    tpt = 0.07  # teacher温度参数
-    tps = 0.07  # student温度参数
+def mixup_data(x, y, mix_idx, alpha, key):
+    batch_size = x.shape[0]
+    mixed_x = jnp.zeros_like(x)
+    mixed_y = jnp.zeros_like(y)
+    keys = random.split(key, batch_size) 
 
-    # 合并静态参数和传入的模型参数
-    student_params = util.dict_merge(student_params, sparams)
-    teacher_params = util.dict_merge(teacher_params, sparams)
-    
-    # 数据增强
-    data_aug1 = apply_combined_transform(data)
-    data_aug2 = apply_combined_transform(data)
-    
-    # 学生模型的前向传播
-    student_out1, updated_state = student_module.apply(
-        {'params': student_params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(data_aug1))
-    student_out2, _ = student_module.apply(
-        {'params': student_params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(data_aug2))
-    
-    # 教师模型的前向传播（不需要梯度）
-    with jax.lax.stop_gradient():
-        teacher_out1 = teacher_module.apply(
-            {'params': teacher_params, 'aux_inputs': aux, 'const': const}, core.Signal(data_aug1))
-        teacher_out2 = teacher_module.apply(
-            {'params': teacher_params, 'aux_inputs': aux, 'const': const}, core.Signal(data_aug2))
-    
-    # 计算损失函数
-    loss = 0
-    for student_out, teacher_out in zip([student_out1, student_out2], [teacher_out1, teacher_out2]):
-        # Softmax操作
-        teacher_out_probs = jax.nn.softmax(teacher_out / tpt, axis=-1)
-        student_out_probs = jax.nn.softmax(student_out / tps, axis=-1)
-        
-        # 计算损失
-        loss += -jnp.mean(jnp.sum(teacher_out_probs * jnp.log(student_out_probs + 1e-6), axis=-1))
+    for i in range(batch_size):
+        logits = jnp.log(mix_idx[i]).astype(jnp.float32)
+        j = random.categorical(keys[i], logits)
+        lam = random.beta(keys[i], alpha, alpha)
+        mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
+        mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
 
-    # 平均两个损失
-    loss /= 2
+    return mixed_x, mixed_y
 
-    return loss, updated_state
+  
+def loss_fn(module: layer.Layer,
+            params: Dict,
+            state: Dict,
+            y: Array,
+            x: Array,
+            aux: Dict,
+            const: Dict,
+            sparams: Dict,):
+    params = util.dict_merge(params, sparams)
+    # y_transformed = apply_transform(y)
+    y_transformed1 = apply_combined_transform(y)
+   
+    z_original, updated_state = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
+    z_transformed1, _ = module.apply(
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
+    key = random.PRNGKey(0)          
+    y_values = z_original.val.reshape(-1, 1)  
+    aligned_x = x[z_original.t.start:z_original.t.stop] 
+    mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.5)
+    mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=1.0, key=key)
+    mixed_y = mixed_y.reshape(-1, 2)
+    mse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
+              
+    # aligned_x = x[z_original.t.start:z_original.t.stop]
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    z_original_real = jnp.abs(z_original.val)   
+    z_transformed_real1 = jnp.abs(z_transformed1.val) 
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)   
+    # total_loss = mse_loss + contrastive_loss
 
-
-
+    return mse_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
