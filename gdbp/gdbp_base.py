@@ -272,7 +272,7 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
     return x
   
   
-def loss_fn_dino(student_module: layer.Layer,
+def loss_fn(student_module: layer.Layer,
                  teacher_module: layer.Layer,
                  student_params: Dict,
                  teacher_params: Dict,
