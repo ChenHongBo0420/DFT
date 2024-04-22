@@ -272,22 +272,24 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
     return x
   
   
-def loss_fn(student_module: layer.Layer,
+def loss_fn_dino(student_module: layer.Layer,
                  teacher_module: layer.Layer,
                  student_params: Dict,
                  teacher_params: Dict,
                  state: Dict,
                  data: Array,
                  aux: Dict,
-                 const: Dict,
-                 sparams: Dict,
-                 tpt: float,
-                 tps: float):
+                 const: Dict):
+    # 固定的sparams, tpt和tps数值
+    sparams = {}  # 如果需要静态参数，可以在这里定义
+    tpt = 0.07  # teacher温度参数
+    tps = 0.07  # student温度参数
+
     # 合并静态参数和传入的模型参数
     student_params = util.dict_merge(student_params, sparams)
     teacher_params = util.dict_merge(teacher_params, sparams)
     
-    # 为输入数据生成两个随机的增强版本
+    # 数据增强
     data_aug1 = apply_combined_transform(data)
     data_aug2 = apply_combined_transform(data)
     
@@ -304,23 +306,21 @@ def loss_fn(student_module: layer.Layer,
         teacher_out2 = teacher_module.apply(
             {'params': teacher_params, 'aux_inputs': aux, 'const': const}, core.Signal(data_aug2))
     
-    # 计算损失函数，这里我们使用cross-entropy损失的一种形式
-    # 这里t和s是softmax之后的输出
+    # 计算损失函数
     loss = 0
     for student_out, teacher_out in zip([student_out1, student_out2], [teacher_out1, teacher_out2]):
-        # 通过教师输出计算目标概率分布
-        teacher_out_probs = jax.nn.softmax(teacher_out.val / tpt, axis=-1)
+        # Softmax操作
+        teacher_out_probs = jax.nn.softmax(teacher_out / tpt, axis=-1)
+        student_out_probs = jax.nn.softmax(student_out / tps, axis=-1)
         
-        # 学生输出也进行softmax
-        student_out_probs = jax.nn.softmax(student_out.val / tps, axis=-1)
-        
-        # 计算每个增强版本的cross-entropy损失
+        # 计算损失
         loss += -jnp.mean(jnp.sum(teacher_out_probs * jnp.log(student_out_probs + 1e-6), axis=-1))
 
     # 平均两个损失
     loss /= 2
 
     return loss, updated_state
+
 
 
 
