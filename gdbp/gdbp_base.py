@@ -295,10 +295,10 @@ def get_mixup_sample_rate(y_list, bandwidth=1.0):
     density /= density.sum()
     return jnp.tile(density, (y_list.shape[0], 1))
   
-def jax_histogram(data, bins=10, range=None, density=False):
-    if range is None:
-        range = (jnp.min(data), jnp.max(data))
-    bin_edges = jnp.linspace(range[0], range[1], bins + 1)
+def jax_histogram(data, bins=10, bin_range=None, density=False):
+    if bin_range is None:
+        bin_range = (jnp.min(data), jnp.max(data))
+    bin_edges = jnp.linspace(bin_range[0], bin_range[1], bins + 1)
     bin_indices = jnp.digitize(data, bin_edges, right=True)
     bin_counts = jnp.zeros(bins)
     for i in range(1, bins + 1):
