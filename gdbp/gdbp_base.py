@@ -308,13 +308,12 @@ def jax_histogram(data, bins=10, bin_range=None, density=False):
     return bin_counts, bin_edges
 
 def get_mixup_sample_rate_jax(y_list, bins=100):
-    # 使用绝对值处理复数数据
-    abs_y_list = jnp.abs(y_list.flatten())
+    abs_y_list = jnp.abs(y_list.flatten())  # 确保处理的是绝对值
     hist, bin_edges = jax_histogram(abs_y_list, bins=bins, density=True)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     probabilities = jnp.interp(abs_y_list, bin_centers, hist)
-    probabilities /= probabilities.sum()  # Normalize to form a probability distribution
-    return probabilities
+    probabilities /= probabilities.sum()  # 归一化为概率分布
+    return probabilities.reshape(-1, 1)  # 确保返回的是每个样本一个概率分布向量
 
   
 def mixup_data(x, y, mix_idx, alpha, key):
@@ -323,14 +322,9 @@ def mixup_data(x, y, mix_idx, alpha, key):
     mixed_y = jnp.zeros_like(y)
     keys = random.split(key, batch_size) 
 
-    if mix_idx.size == 0:
-        raise ValueError("mix_idx is empty. Check your mix_idx calculation.")
-
     for i in range(batch_size):
-        print(f"mix_idx[{i}]:", mix_idx[i])  # Debugging output
-        logits = jnp.log(mix_idx[i]).astype(jnp.float32)
-        print(f"logits[{i}]:", logits)  # Debugging output
-        j = random.categorical(keys[i], logits)
+        logits = jnp.log(mix_idx[i] + 1e-9).astype(jnp.float32)  # 防止对数的问题
+        j = random.categorical(keys[i], logits, axis=0)  # 明确axis
         lam = random.beta(keys[i], alpha, alpha)
         mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
         mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
