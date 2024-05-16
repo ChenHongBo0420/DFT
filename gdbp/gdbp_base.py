@@ -11,8 +11,6 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-import distrax
-from distrax import MixtureSameFamily, Categorical, Normal
 
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
@@ -273,66 +271,31 @@ def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0),
         x = jnp.roll(x, shift=t_shift)
     return x
   
-def gaussian_mixture_kde(data, bandwidth):
-    num_components = data.shape[0]
-    mixture_distribution = Categorical(probs=jnp.ones(num_components) / num_components)
-    component_distribution = Normal(loc=data.flatten(), scale=jnp.full(data.shape[0], fill_value=bandwidth))
-    mixture_model = MixtureSameFamily(mixture_distribution, component_distribution)
-    return mixture_model
-
-def evaluate_density(mixture_model, points):
-    points = points.flatten()
-    log_probs = mixture_model.log_prob(points)
-    probs = jnp.exp(log_probs)
-    return probs
-
-
-def get_mixup_sample_rate(y_list, bandwidth=1.0):
-    y_list = jnp.array(y_list)
-    y_list = jnp.abs(y_list)
-    mixture_model = gaussian_mixture_kde(y_list, bandwidth)
-    density = evaluate_density(mixture_model, y_list)
-    density /= density.sum()
-    return jnp.tile(density, (y_list.shape[0], 1))
+def energy(x):
+    return jnp.sum(jnp.square(x))
   
-def jax_histogram(data, bins=10, bin_range=None, density=False):
-    if bin_range is None:
-        bin_range = (jnp.min(data), jnp.max(data))
-    bin_edges = jnp.linspace(bin_range[0], bin_range[1], bins + 1)
-    bin_indices = jnp.digitize(data, bin_edges, right=True)
-    bin_counts = jnp.zeros(bins)
-    for i in range(1, bins + 1):
-        bin_counts = bin_counts.at[i-1].set(jnp.sum(bin_indices == i))
-    if density:
-        bin_counts = bin_counts / (jnp.sum(bin_counts) * (bin_edges[1] - bin_edges[0]))
-    return bin_counts, bin_edges
-
-def get_mixup_sample_rate_jax(y_list, bins=100):
-    abs_y_list = jnp.abs(y_list.flatten())  # 确保处理的是绝对值
-    hist, bin_edges = jax_histogram(abs_y_list, bins=bins, density=True)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    probabilities = jnp.interp(abs_y_list, bin_centers, hist)
-    probabilities /= probabilities.sum()  # 归一化为概率分布
-    return probabilities.reshape(-1, 1)  # 确保返回的是每个样本一个概率分布向量
-
-  
-def mixup_data(x, y, mix_idx, alpha, key):
-    batch_size = x.shape[0]
-    mixed_x = jnp.zeros_like(x)
-    mixed_y = jnp.zeros_like(y)
-    keys = random.split(key, batch_size) 
-
-    for i in range(batch_size):
-        logits = jnp.log(mix_idx[i] + 1e-9).astype(jnp.float32)  # 防止对数的问题
-        j = random.categorical(keys[i], logits, axis=0)  # 明确axis
-        lam = random.beta(keys[i], alpha, alpha)
-        mixed_x = mixed_x.at[i].set(lam * x[i] + (1 - lam) * x[j])
-        mixed_y = mixed_y.at[i].set(lam * y[i] + (1 - lam) * y[j])
-
-    return mixed_x, mixed_y
+def si_snr(target, estimate, eps=1e-8):
+    # 目标信号能量
+    target_energy = energy(target)
+    
+    # 估计信号和目标信号的点积
+    dot_product = jnp.sum(target * estimate)
+    
+    # 投影估计信号到目标信号上
+    s_target = dot_product / (target_energy + eps) * target
+    
+    # 误差信号
+    e_noise = estimate - s_target
+    
+    # 目标和误差的能量
+    target_energy = energy(s_target)
+    noise_energy = energy(e_noise)
+    
+    # 计算SI-SNR
+    si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
+    return -si_snr_value  # 返回负值，因为优化过程中需要最小化损失
 
 
-  
 def loss_fn(module: layer.Layer,
             params: Dict,
             state: Dict,
@@ -344,31 +307,27 @@ def loss_fn(module: layer.Layer,
     params = util.dict_merge(params, sparams)
     # y_transformed = apply_transform(y)
     y_transformed1 = apply_combined_transform(y)
-   
+    
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
     z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))
-    key = random.PRNGKey(0)          
-    y_values = z_original.val.reshape(-1, 1)  
-    aligned_x = x[z_original.t.start:z_original.t.stop] 
-    # mix_idx = get_mixup_sample_rate(y_values, bandwidth=0.1)
-    mix_idx = get_mixup_sample_rate_jax(y_values)
-    mixed_x, mixed_y = mixup_data(aligned_x, y_values, mix_idx, alpha=0.2, key=key)
-    mixed_y = mixed_y.reshape(-1, 2)
-    mmse_loss = jnp.mean(jnp.abs(mixed_x - mixed_y) ** 2)
-              
-    # aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-              
-    # z_original_real = jnp.abs(z_original.val)   
-    # z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    # z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    # contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - x) ** 2)   
-    # total_loss = mse_loss + contrastive_loss
+        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
 
-    return mmse_loss, updated_state
+    aligned_x = x[z_original.t.start:z_original.t.stop]
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+         
+    # feature_1 = z_original.val[:, 0]
+    # feature_2 = z_original.val[:, 1]
+    z_original_real = jnp.abs(z_original.val)
+    z_transformed_real1 = jnp.abs(z_transformed1.val) 
+    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
+    batch_power_loss = jnp.mean(jnp.abs(z_original.val)**2)
+    power_variance_loss = jnp.var(jnp.abs(z_original.val)**2)
+    # mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
+    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
+    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    total_loss = contrastive_loss + batch_power_loss + power_variance_loss
+    return mse_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
