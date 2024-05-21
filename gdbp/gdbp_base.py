@@ -164,13 +164,12 @@ def model_init(data: gdat.Input,
     aux = v0['aux_inputs']
     const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
-
   
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
     return x / x_inv_norm
-  
+
 def label_difference(labels, distance_type='l1'):
     if distance_type == 'l1':
         return jnp.sum(jnp.abs(labels[:, None, :] - labels[None, :, :]), axis=-1)
@@ -185,7 +184,8 @@ def feature_similarity(features, similarity_type='l2'):
 
 @jit
 def rnc_loss(features, labels, temperature=2, label_diff='l1', feature_sim='l2'):
-    features = jnp.concatenate([features[:, 0], features[:, 1]], axis=0)  # [2bs, feat_dim]
+    batch_size, num_features, feature_dim = features.shape
+    features = features.reshape(2 * batch_size, feature_dim)  # [2bs, feat_dim]
     labels = jnp.tile(labels, (2, 1))  # [2bs, label_dim]
 
     label_diffs = label_difference(labels, label_diff)
