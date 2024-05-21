@@ -171,16 +171,45 @@ def l2_normalize(x, axis=None, epsilon=1e-12):
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
     return x / x_inv_norm
   
-def q_factor_loss(y, y_hat):
-    # 使用 jnp.where 进行索引
-    mu_1 = jnp.mean(jnp.where(y_hat > 0.5, y, 0))
-    mu_0 = jnp.mean(jnp.where(y_hat <= 0.5, y, 0))
-    sigma_1 = jnp.std(jnp.where(y_hat > 0.5, y, 0))
-    sigma_0 = jnp.std(jnp.where(y_hat <= 0.5, y, 0))
-    
-    # 计算 Q-factor
-    q_factor = (mu_1 - mu_0) / (sigma_1 + sigma_0 + 1e-8)
-    return 1 / (q_factor + 1e-8)
+def label_difference(labels, distance_type='l1'):
+    if distance_type == 'l1':
+        return jnp.sum(jnp.abs(labels[:, None, :] - labels[None, :, :]), axis=-1)
+    else:
+        raise ValueError(f"Unsupported distance type: {distance_type}")
+
+def feature_similarity(features, similarity_type='l2'):
+    if similarity_type == 'l2':
+        return -jnp.linalg.norm(features[:, None, :] - features[None, :, :], ord=2, axis=-1)
+    else:
+        raise ValueError(f"Unsupported similarity type: {similarity_type}")
+
+@jit
+def rnc_loss(features, labels, temperature=2, label_diff='l1', feature_sim='l2'):
+    features = jnp.concatenate([features[:, 0], features[:, 1]], axis=0)  # [2bs, feat_dim]
+    labels = jnp.tile(labels, (2, 1))  # [2bs, label_dim]
+
+    label_diffs = label_difference(labels, label_diff)
+    logits = feature_similarity(features, feature_sim) / temperature
+    logits_max = jnp.max(logits, axis=1, keepdims=True)
+    logits -= logits_max
+    exp_logits = jnp.exp(logits)
+
+    n = logits.shape[0]  # n = 2bs
+
+    mask = 1 - jnp.eye(n)
+    logits = jnp.where(mask, logits, -jnp.inf)
+    exp_logits = jnp.where(mask, exp_logits, 0)
+    label_diffs = jnp.where(mask, label_diffs, jnp.inf)
+
+    loss = 0.
+    for k in range(n - 1):
+        pos_logits = logits[:, k]  # 2bs
+        pos_label_diffs = label_diffs[:, k]  # 2bs
+        neg_mask = (label_diffs >= pos_label_diffs[:, None]).astype(float)  # [2bs, 2bs - 1]
+        pos_log_probs = pos_logits - jnp.log(jnp.sum(neg_mask * exp_logits, axis=-1))  # 2bs
+        loss += -jnp.sum(pos_log_probs / (n * (n - 1)))
+
+    return loss
   
 def energy(x):
     return jnp.sum(jnp.square(x))
@@ -213,7 +242,7 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    q_loss = q_factor_loss(jnp.abs(aligned_x), jnp.abs(z_original.val))
+    q_loss = rnc_loss(jnp.abs(aligned_x), jnp.abs(z_original.val))
     total_loss = snr + q_loss
     return total_loss, updated_state
 
