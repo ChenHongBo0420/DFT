@@ -172,13 +172,15 @@ def l2_normalize(x, axis=None, epsilon=1e-12):
     return x / x_inv_norm
   
 def q_factor_loss(y, y_hat):
-    # 简化的 Q-factor 计算方法
-    mu_1 = jnp.mean(y[y_hat > 0.5])
-    mu_0 = jnp.mean(y[y_hat <= 0.5])
-    sigma_1 = jnp.std(y[y_hat > 0.5])
-    sigma_0 = jnp.std(y[y_hat <= 0.5])
-    q_factor = (mu_1 - mu_0) / (sigma_1 + sigma_0)
-    return 1 / (q_factor + 1e-8)  # 取倒数以最小
+    # 使用 jnp.where 进行索引
+    mu_1 = jnp.mean(jnp.where(y_hat > 0.5, y, 0))
+    mu_0 = jnp.mean(jnp.where(y_hat <= 0.5, y, 0))
+    sigma_1 = jnp.std(jnp.where(y_hat > 0.5, y, 0))
+    sigma_0 = jnp.std(jnp.where(y_hat <= 0.5, y, 0))
+    
+    # 计算 Q-factor
+    q_factor = (mu_1 - mu_0) / (sigma_1 + sigma_0 + 1e-8)
+    return 1 / (q_factor + 1e-8)
   
 def energy(x):
     return jnp.sum(jnp.square(x))
