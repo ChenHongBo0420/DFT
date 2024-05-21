@@ -184,8 +184,8 @@ def feature_similarity(features, similarity_type='l2'):
 
 @jit
 def rnc_loss(features, labels, temperature=2, label_diff='l1', feature_sim='l2'):
-    batch_size, num_features, feature_dim = features.shape
-    features = features.reshape(2 * batch_size, feature_dim)  # [2bs, feat_dim]
+    batch_size, feature_dim = features.shape
+    features = jnp.concatenate([features, features], axis=0)  # [2bs, feat_dim]
     labels = jnp.tile(labels, (2, 1))  # [2bs, label_dim]
 
     label_diffs = label_difference(labels, label_diff)
