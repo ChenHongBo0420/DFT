@@ -165,15 +165,6 @@ def model_init(data: gdat.Input,
     const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
-
-def get_array_mel_loss(clean_array, est_array):
-    array_mel_loss = 0
-    for i in range(len(clean_array)):
-        mel_loss = get_mel_loss(clean_array[i], est_array[i])
-        array_mel_loss += mel_loss
-
-    avg_mel_loss = array_mel_loss / len(clean_array)
-    return avg_mel_loss
   
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
@@ -212,8 +203,7 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    mel_loss = get_array_mel_loss(jnp.abs(aligned_x), jnp.abs(z_original.val))
-    total_loss = snr + mel_loss * 1e3
+    total_loss = snr + mse_loss
     return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
