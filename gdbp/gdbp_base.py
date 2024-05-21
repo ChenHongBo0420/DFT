@@ -171,6 +171,10 @@ def l2_normalize(x, axis=None, epsilon=1e-12):
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
     return x / x_inv_norm
   
+def kl_divergence(p, q, eps=1e-8):
+    p = p + eps
+    q = q + eps
+    return jnp.sum(p * jnp.log(p / q))
   
 def energy(x):
     return jnp.sum(jnp.square(x))
@@ -201,9 +205,10 @@ def loss_fn(module: layer.Layer,
       
 
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    total_loss = snr + mse_loss
+    kl_loss = kl_divergence(jnp.abs(aligned_x), jnp.abs(z_original.val))
+    total_loss = snr + kl_loss
     return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
