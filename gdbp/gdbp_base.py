@@ -166,134 +166,24 @@ def model_init(data: gdat.Input,
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
-def simclr_contrastive_loss(z1, z2, temperature=0.1, LARGE_NUM=1e9):
-    batch_size = z1.shape[0]
-
-    z1 = l2_normalize(z1, axis=1)
-    z2 = l2_normalize(z2, axis=1)
-
-    representations = jnp.vstack([z1, z2])
-
-    similarity_matrix = jnp.matmul(representations, representations.T) / temperature
-
-    similarity_matrix -= jnp.eye(2 * batch_size) * LARGE_NUM
-
-    positives = jnp.exp(similarity_matrix[:batch_size, batch_size:]) / temperature
-    negatives = jnp.sum(jnp.exp(similarity_matrix[:batch_size, :batch_size]) / temperature, axis=1) + \
-                jnp.sum(jnp.exp(similarity_matrix[:batch_size, batch_size + 1:]) / temperature, axis=1)
-
-    loss = -jnp.log(positives / (positives + negatives))
-    loss = jnp.mean(loss)
-
-    return loss
-
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
     return x / x_inv_norm
   
-def negative_cosine_similarity(p, z):
-    p = l2_normalize(p, axis=1)
-    z = l2_normalize(z, axis=1)
-    return -jnp.mean(jnp.sum(p * z, axis=1))
-  
-#scale-1
-def apply_transform(x, scale_range=(0.5, 2.0), p=0.5):
-    if np.random.rand() < p:
-        scale = np.random.uniform(scale_range[0], scale_range[1])
-        x = x * scale
-    return x
-  
-# shift-2  
-def apply_transform1(x, shift_range=(-5.0, 5.0), p=0.5):
-    if np.random.rand() < p:
-        shift = np.random.uniform(shift_range[0], shift_range[1])
-        x = x + shift
-    return x
-  
-# mask-3
-# def apply_transform2(x, range=(0, 300), p=0.5):
-#     if np.random.rand() < p:
-#         mask_len = int(np.random.uniform(range[0], range[1]))
-#         start = int(np.random.uniform(0, len(x) - mask_len))
-#         mask = jnp.ones_like(x)
-#         mask = mask.at[start:start + mask_len].set(0)
-#         x = x * mask
-#     return x
-
-# def apply_transform2(x, p=0.5):
-#     if np.random.rand() < p:
-#         total_length = x.shape[0]
-#         mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
-#         mask = jnp.array(mask)
-#         x = x * mask
-#     return x
-
-def apply_transform2(x, mask_range=(0, 30), p=0.5):
-    if np.random.rand() < p:
-        total_length = x.shape[0]
-        mask = np.random.choice([0, 1], size=total_length, p=[1-p, p])
-        mask = jnp.array(mask)[:, None]
-        mask = jnp.broadcast_to(mask, x.shape)
-        x = x * mask
-    return x
-  
-# random-4
-def apply_transform3(x, range=(0.0, 0.2), p=0.5):
-    if np.random.rand() < p:
-        sigma = np.random.uniform(range[0], range[1])
-        x = x + np.random.normal(0, sigma, x.shape)
-    return x
-  
-def apply_combined_transform(x, scale_range=(0.5, 2.0), shift_range=(-5.0, 5.0), shift_range1=(-100, 100), mask_range=(0, 30), noise_range=(0.0, 0.2), p_scale=0.5, p_shift=0.5, p_mask=0.5, p_noise=0.5, p=0.5):
-    if np.random.rand() < p_scale:
-        scale = np.random.uniform(scale_range[0], scale_range[1])
-        x = x * scale
-
-    if np.random.rand() < p_shift:
-        shift = np.random.uniform(shift_range[0], shift_range[1])
-        x = x + shift
-
-    if np.random.rand() < p_mask:
-        total_length = x.shape[0]
-        mask = np.random.choice([0, 1], size=total_length, p=[1-p_mask, p_mask])
-        mask = jnp.array(mask)[:, None]
-        mask = jnp.broadcast_to(mask, x.shape)
-        x = x * mask
-
-    if np.random.rand() < p_noise:
-        sigma = np.random.uniform(noise_range[0], noise_range[1])
-        noise = np.random.normal(0, sigma, x.shape)
-        x = x + noise
-
-    if np.random.rand() < p:
-        t_shift = np.random.randint(shift_range1[0], shift_range1[1])
-        x = jnp.roll(x, shift=t_shift)
-    return x
   
 def energy(x):
     return jnp.sum(jnp.square(x))
   
 def si_snr(target, estimate, eps=1e-8):
-    # 目标信号能量
     target_energy = energy(target)
-    
-    # 估计信号和目标信号的点积
     dot_product = jnp.sum(target * estimate)
-    
-    # 投影估计信号到目标信号上
     s_target = dot_product / (target_energy + eps) * target
-    
-    # 误差信号
     e_noise = estimate - s_target
-    
-    # 目标和误差的能量
     target_energy = energy(s_target)
     noise_energy = energy(e_noise)
-    
-    # 计算SI-SNR
     si_snr_value = 10 * jnp.log10((target_energy + eps) / (noise_energy + eps))
-    return -si_snr_value  # 返回负值，因为优化过程中需要最小化损失
+    return -si_snr_value  
 
 
 def loss_fn(module: layer.Layer,
@@ -305,29 +195,16 @@ def loss_fn(module: layer.Layer,
             const: Dict,
             sparams: Dict,):
     params = util.dict_merge(params, sparams)
-    # y_transformed = apply_transform(y)
-    y_transformed1 = apply_combined_transform(y)
     
     z_original, updated_state = module.apply(
         {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y))
-    z_transformed1, _ = module.apply(
-        {'params': params, 'aux_inputs': aux, 'const': const, **state}, core.Signal(y_transformed1))       
+      
 
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
-         
-    # feature_1 = z_original.val[:, 0]
-    # feature_2 = z_original.val[:, 1]
-    z_original_real = jnp.abs(z_original.val)
-    z_transformed_real1 = jnp.abs(z_transformed1.val) 
-    z_transformed1_real1 = jax.lax.stop_gradient(z_transformed_real1)
-    batch_power_loss = jnp.mean(jnp.abs(z_original.val)**2)
-    power_variance_loss = jnp.var(jnp.abs(z_original.val)**2)
-    # mse_loss = jnp.mean((feature_1 - feature_2) ** 2)
-    contrastive_loss = negative_cosine_similarity(z_original_real, z_transformed1_real1)  
-    # snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    total_loss = contrastive_loss + batch_power_loss + power_variance_loss
-    return mse_loss, updated_state
+    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
+    total_loss = snr
+    return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
 def update_step(module: layer.Layer,
