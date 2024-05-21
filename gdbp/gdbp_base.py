@@ -201,9 +201,9 @@ def loss_fn(module: layer.Layer,
       
 
     aligned_x = x[z_original.t.start:z_original.t.stop]
-    # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
+    mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    total_loss = snr
+    total_loss = mse_loss
     return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
