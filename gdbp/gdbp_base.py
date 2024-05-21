@@ -201,14 +201,14 @@ def rnc_loss(features, labels, temperature=2, label_diff='l1', feature_sim='l2')
     exp_logits = jnp.where(mask, exp_logits, 0)
     label_diffs = jnp.where(mask, label_diffs, jnp.inf)
 
-    loss = 0.
-    for k in range(n - 1):
+    def compute_pos_log_probs(k):
         pos_logits = logits[:, k]  # 2bs
         pos_label_diffs = label_diffs[:, k]  # 2bs
         neg_mask = (label_diffs >= pos_label_diffs[:, None]).astype(float)  # [2bs, 2bs - 1]
         pos_log_probs = pos_logits - jnp.log(jnp.sum(neg_mask * exp_logits, axis=-1))  # 2bs
-        loss += -jnp.sum(pos_log_probs / (n * (n - 1)))
+        return -jnp.sum(pos_log_probs / (n * (n - 1)))
 
+    loss = jnp.sum(jax.vmap(compute_pos_log_probs)(jnp.arange(n - 1)))
     return loss
   
 def energy(x):
