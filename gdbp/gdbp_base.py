@@ -11,7 +11,7 @@ from . import data as gdat
 import jax
 from scipy import signal
 from flax import linen as nn
-from jax import vmap
+
 Model = namedtuple('Model', 'module initvar overlaps name')
 Array = Any
 Dict = Union[dict, flax.core.FrozenDict]
@@ -191,12 +191,12 @@ def rnc_loss(features, labels, temperature=2, label_diff='l1', feature_sim='l2')
     label_diffs = label_difference(labels, label_diff)
     logits = feature_similarity(features, feature_sim) / temperature
     logits_max = jnp.max(logits, axis=1, keepdims=True)
-    logits = logits - logits_max
+    logits -= logits_max
     exp_logits = jnp.exp(logits)
 
     n = logits.shape[0]  # n = 2bs
 
-    mask = 1 - jnp.eye(n, dtype=bool)
+    mask = 1 - jnp.eye(n)
     logits = jnp.where(mask, logits, -jnp.inf)
     exp_logits = jnp.where(mask, exp_logits, 0)
     label_diffs = jnp.where(mask, label_diffs, jnp.inf)
@@ -205,10 +205,10 @@ def rnc_loss(features, labels, temperature=2, label_diff='l1', feature_sim='l2')
         pos_logits = logits[:, k]  # 2bs
         pos_label_diffs = label_diffs[:, k]  # 2bs
         neg_mask = (label_diffs >= pos_label_diffs[:, None]).astype(float)  # [2bs, 2bs - 1]
-        pos_log_probs = pos_logits - jnp.log(jnp.sum(neg_mask * exp_logits, axis=-1) + 1e-8)  # 2bs
+        pos_log_probs = pos_logits - jnp.log(jnp.sum(neg_mask * exp_logits, axis=-1))  # 2bs
         return -jnp.sum(pos_log_probs / (n * (n - 1)))
 
-    loss = jnp.sum(vmap(compute_pos_log_probs)(jnp.arange(n - 1)))
+    loss = jnp.sum(jax.vmap(compute_pos_log_probs)(jnp.arange(n - 1)))
     return loss
   
 def energy(x):
