@@ -170,47 +170,6 @@ def l2_normalize(x, axis=None, epsilon=1e-12):
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
     return x / x_inv_norm
 
-def label_difference(labels, distance_type='l1'):
-    if distance_type == 'l1':
-        return jnp.sum(jnp.abs(labels[:, None, :] - labels[None, :, :]), axis=-1)
-    else:
-        raise ValueError(f"Unsupported distance type: {distance_type}")
-
-def feature_similarity(features, similarity_type='l2'):
-    if similarity_type == 'l2':
-        return -jnp.linalg.norm(features[:, None, :] - features[None, :, :], ord=2, axis=-1)
-    else:
-        raise ValueError(f"Unsupported similarity type: {similarity_type}")
-
-@jit
-def rnc_loss(features, labels, temperature=2, label_diff='l1', feature_sim='l2'):
-    batch_size, feature_dim = features.shape
-    features = jnp.concatenate([features, features], axis=0)  # [2bs, feat_dim]
-    labels = jnp.tile(labels, (2, 1))  # [2bs, label_dim]
-
-    label_diffs = label_difference(labels, label_diff)
-    logits = feature_similarity(features, feature_sim) / temperature
-    logits_max = jnp.max(logits, axis=1, keepdims=True)
-    logits -= logits_max
-    exp_logits = jnp.exp(logits)
-
-    n = logits.shape[0]  # n = 2bs
-
-    mask = 1 - jnp.eye(n)
-    logits = jnp.where(mask, logits, -jnp.inf)
-    exp_logits = jnp.where(mask, exp_logits, 0)
-    label_diffs = jnp.where(mask, label_diffs, jnp.inf)
-
-    def compute_pos_log_probs(k):
-        pos_logits = logits[:, k]  # 2bs
-        pos_label_diffs = label_diffs[:, k]  # 2bs
-        neg_mask = (label_diffs >= pos_label_diffs[:, None]).astype(float)  # [2bs, 2bs - 1]
-        pos_log_probs = pos_logits - jnp.log(jnp.sum(neg_mask * exp_logits, axis=-1))  # 2bs
-        return -jnp.sum(pos_log_probs / (n * (n - 1)))
-
-    loss = jnp.sum(jax.vmap(compute_pos_log_probs)(jnp.arange(n - 1)))
-    return loss
-  
 def energy(x):
     return jnp.sum(jnp.square(x))
   
@@ -242,8 +201,7 @@ def loss_fn(module: layer.Layer,
     aligned_x = x[z_original.t.start:z_original.t.stop]
     # mse_loss = jnp.mean(jnp.abs(z_original.val - aligned_x) ** 2)
     snr = si_snr(jnp.abs(z_original.val), jnp.abs(aligned_x))
-    q_loss = rnc_loss(jnp.abs(aligned_x), jnp.abs(z_original.val))
-    total_loss = snr + q_loss
+    total_loss = snr
     return total_loss, updated_state
 
 @partial(jit, backend='cpu', static_argnums=(0, 1))
