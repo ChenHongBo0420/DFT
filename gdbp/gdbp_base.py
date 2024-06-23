@@ -48,17 +48,18 @@ Dict = Union[dict, flax.core.FrozenDict]
 #     return base
 
 class Encoder(nn.Module):
-    conv1d: nn.Module
+    input_dim: int
     hidden_dim: int
     z_dim: int
 
     def setup(self):
-        self.conv = self.conv1d
+        self.dense_hidden = nn.Dense(self.hidden_dim)
         self.dense_mean = nn.Dense(self.z_dim)
         self.dense_logvar = nn.Dense(self.z_dim)
 
     def __call__(self, x):
-        x = self.conv(x)
+        x = self.dense_hidden(x)
+        x = nn.relu(x) 
         x = x.reshape((x.shape[0], -1))  # Flatten the output for the dense layers
         z_mean = self.dense_mean(x)
         z_logvar = self.dense_logvar(x)
