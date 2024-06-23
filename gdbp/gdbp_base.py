@@ -88,6 +88,7 @@ class VAE(nn.Module):
     init_fn: tuple = (core.delta, core.gauss)
     w0: float = 0.0
     mode: str = 'train'
+    input_dim: int = 784  # Example input dimension, adjust as needed
     hidden_dim: int = 128
     z_dim: int = 20
 
@@ -103,8 +104,7 @@ class VAE(nn.Module):
         else:
             raise ValueError('invalid mode %s' % self.mode)
 
-        self.conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=self.rtaps)
-        self.encoder = Encoder(conv1d=self.conv1d, hidden_dim=self.hidden_dim, z_dim=self.z_dim)
+        self.encoder = Encoder(input_dim=self.input_dim, hidden_dim=self.hidden_dim, z_dim=self.z_dim)
 
         self.base_layers = [
             layer.FDBP(steps=self.steps, dtaps=self.dtaps, ntaps=self.ntaps, d_init=d_init, n_init=n_init),
