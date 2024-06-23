@@ -120,9 +120,7 @@ def make_base_module(steps: int = 3,
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
-    base_layers1 = [
-        layer.vmap(layer.Conv1d)(name='Conv', taps=rtaps),
-    ]
+    
     base_layers = [
         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
@@ -130,11 +128,16 @@ def make_base_module(steps: int = 3,
         layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
         layer.MIMOAF(train=mimo_train)
     ]
-      
+    base_layers1 = [
+        layer.vmap(layer.Conv1d)(name='Conv', taps=rtaps),
+    ]
+    base_layers2 = [
+        layer.vmap(layer.Conv1d)(name='Conv1', taps=rtaps),
+    ]
     base = layer.Serial(*base_layers)
     base1 = layer.Serial(*base_layers1)
-    
-    return base, base1
+    base2 = layer.Serial(*base_layers2)
+    return base, base1, base2
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -227,9 +230,11 @@ def model_init(data: gdat.Input,
                sps : int = 2,
                name='Model'):
     
-    mod, mod2 = make_base_module(**base_conf, w0=data.w0)
+    mod, mod1, mod2 = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
+    z = reparameterize(rng0, mod1, mod2)
+    mod = jnp.concatenate([mod, z], axis=-1)
     z0, v0 = mod.init(rng0, core.Signal(y0))
     ol = z0.t.start - z0.t.stop
     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
