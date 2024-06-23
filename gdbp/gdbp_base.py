@@ -63,8 +63,8 @@ class Encoder(nn.Module):
         z_mean = self.dense_mean(x)
         z_logvar = self.dense_logvar(x)
         return z_mean, z_logvar
-     
- class Decoder(nn.Module):
+ 
+class Decoder(nn.Module):
     base_layers: list
 
     def setup(self):
