@@ -227,7 +227,7 @@ def model_init(data: gdat.Input,
                sps : int = 2,
                name='Model'):
     
-    mod = make_base_module(**base_conf, w0=data.w0)
+    mod, mod2 = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z0, v0 = mod.init(rng0, core.Signal(y0))
