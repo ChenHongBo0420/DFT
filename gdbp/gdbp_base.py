@@ -63,7 +63,7 @@ class Encoder(nn.Module):
         z_mean = self.dense_mean(x)
         z_logvar = self.dense_logvar(x)
         return z_mean, z_logvar
-     
+
 class Decoder(nn.Module):
     base_layers: list
 
@@ -71,10 +71,9 @@ class Decoder(nn.Module):
         self.base_module = nn.Sequential(self.base_layers)
 
     def __call__(self, z, x):
-        # Concatenate z and x along the feature dimension
         combined = jnp.concatenate([x, z], axis=-1)
         return self.base_module(combined)
-     
+
 def reparameterize(key, mu, logvar):
     std = jnp.exp(0.5 * logvar)
     eps = jax.random.normal(key, std.shape)
@@ -130,8 +129,7 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train)
     ]
 
-
-    decoder = Decoder(base_module=base_layers)
+    decoder = Decoder(base_layers=base_layers)
 
     def forward_fn(x, key):
         z_mean, z_logvar = encoder(x)
@@ -225,7 +223,8 @@ def fdbp_init(a: dict,
 #     aux = v0['aux_inputs']
 #     const = v0['const']
 #     return Model(mod, (params, state, aux, const, sparams), ol, name)
-def model_init(data: gdat.Input,
+
+ef model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
@@ -257,7 +256,6 @@ def model_init(data: gdat.Input,
     rng0 = random.PRNGKey(0)
     params = forward_fn.init(rng0, y0)
     
-    # 获取层的名字和值的映射
     def get_vars_dict(params, flat_keys):
         var_dict = FrozenDict(params)
         flattened_dict = jax.tree_util.tree_flatten(var_dict)[0]
