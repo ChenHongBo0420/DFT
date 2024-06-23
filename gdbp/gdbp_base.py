@@ -46,15 +46,6 @@ Dict = Union[dict, flax.core.FrozenDict]
       
 #     base = layer.Serial(*base_layers)
 #     return base
-
-class Encoder(nn.Module):
-    conv1d: nn.Module
-    conv1d1: nn.Module
-
-    def __call__(self, x):
-        z_mean = self.conv1d(x)
-        z_logvar = self.conv1d1(x)
-        return z_mean, z_logvar
  
 class Decoder(nn.Module):
     base_layers: list
@@ -94,7 +85,6 @@ class VAE(nn.Module):
 
         self.conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=self.rtaps)
         self.conv1d1 = layer.vmap(layer.Conv1d)(name='Conv1d1', taps=self.rtaps)
-        self.encoder = Encoder(conv1d=self.conv1d, conv1d1=self.conv1d1)
 
         self.base_layers = [
             layer.FDBP(steps=self.steps, dtaps=self.dtaps, ntaps=self.ntaps, d_init=d_init, n_init=n_init),
@@ -107,7 +97,7 @@ class VAE(nn.Module):
         self.decoder = Decoder(base_layers=self.base_layers)
 
     def __call__(self, x, key):
-        z_mean, z_logvar = self.encoder(x)
+        z_mean, z_logvar = self.conv1d(x), self.conv1d1(x)
         z = reparameterize(key, z_mean, z_logvar)
         reconstructed_x = self.decoder(z, x)
         return reconstructed_x, z_mean, z_logvar
