@@ -63,8 +63,8 @@ class Encoder(nn.Module):
         z_mean = self.dense_mean(x)
         z_logvar = self.dense_logvar(x)
         return z_mean, z_logvar
-
-class Decoder(nn.Module):
+     
+ class Decoder(nn.Module):
     base_layers: list
 
     def setup(self):
@@ -73,71 +73,53 @@ class Decoder(nn.Module):
     def __call__(self, z, x):
         combined = jnp.concatenate([x, z], axis=-1)
         return self.base_module(combined)
-
+     
 def reparameterize(key, mu, logvar):
     std = jnp.exp(0.5 * logvar)
     eps = jax.random.normal(key, std.shape)
     return mu + eps * std
 
-def make_base_module(steps: int = 3,
-                     dtaps: int = 261,
-                     ntaps: int = 41,
-                     rtaps: int = 61,
-                     init_fn: tuple = (core.delta, core.gauss),
-                     w0 = 0.,
-                     mode: str = 'train',
-                     hidden_dim: int = 128,
-                     z_dim: int = 20):
-    '''
-    Make base module that derives DBP, FDBP, EDBP, GDBP depending on
-    specific initialization method and trainable parameters defined
-    by trainer.
+class VAE(nn.Module):
+    steps: int = 3
+    dtaps: int = 261
+    ntaps: int = 41
+    rtaps: int = 61
+    init_fn: tuple = (core.delta, core.gauss)
+    w0: float = 0.0
+    mode: str = 'train'
+    hidden_dim: int = 128
+    z_dim: int = 20
 
-    Args:
-        steps: GDBP steps/layers
-        dtaps: D-filter length
-        ntaps: N-filter length
-        rtaps: R-filter length
-        init_fn: a tuple contains a pair of initializer for D-filter and N-filter
-        mode: 'train' or 'test'
-        hidden_dim: hidden dimension for the encoder
-        z_dim: dimension of the latent space
+    def setup(self):
+        _assert_taps(self.dtaps, self.ntaps, self.rtaps)
 
-    Returns:
-        A function that performs forward pass.
-    '''
+        d_init, n_init = self.init_fn
 
-    _assert_taps(dtaps, ntaps, rtaps)
+        if self.mode == 'train':
+            self.mimo_train = True
+        elif self.mode == 'test':
+            self.mimo_train = cxopt.piecewise_constant([200000], [True, False])
+        else:
+            raise ValueError('invalid mode %s' % self.mode)
 
-    d_init, n_init = init_fn
+        self.conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=self.rtaps)
+        self.encoder = Encoder(conv1d=self.conv1d, hidden_dim=self.hidden_dim, z_dim=self.z_dim)
 
-    if mode == 'train':
-        mimo_train = True
-    elif mode == 'test':
-        mimo_train = cxopt.piecewise_constant([200000], [True, False])
-    else:
-        raise ValueError('invalid mode %s' % mode)
+        self.base_layers = [
+            layer.FDBP(steps=self.steps, dtaps=self.dtaps, ntaps=self.ntaps, d_init=d_init, n_init=n_init),
+            layer.BatchPowerNorm(mode=self.mode),
+            layer.MIMOFOEAf(name='FOEAf', w0=self.w0, train=self.mimo_train, preslicer=core.conv1d_slicer(self.rtaps), foekwargs={}),
+            layer.vmap(layer.Conv1d)(name='RConv', taps=self.rtaps),
+            layer.MIMOAF(train=self.mimo_train)
+        ]
 
-    conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=rtaps)
-    encoder = Encoder(conv1d=conv1d, hidden_dim=hidden_dim, z_dim=z_dim)
+        self.decoder = Decoder(base_layers=self.base_layers)
 
-    base_layers = [
-        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
-        layer.BatchPowerNorm(mode=mode),
-        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
-        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
-        layer.MIMOAF(train=mimo_train)
-    ]
-
-    decoder = Decoder(base_layers=base_layers)
-
-    def forward_fn(x, key):
-        z_mean, z_logvar = encoder(x)
+    def __call__(self, x, key):
+        z_mean, z_logvar = self.encoder(x)
         z = reparameterize(key, z_mean, z_logvar)
-        reconstructed_x = decoder(z, x)
+        reconstructed_x = self.decoder(z, x)
         return reconstructed_x, z_mean, z_logvar
-    
-    return forward_fn
 
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
@@ -251,10 +233,10 @@ def model_init(data: gdat.Input,
         an initialized model wrapped by a namedtuple
     '''
     
-    forward_fn = make_base_module(**base_conf, w0=data.w0)
+    mod = VAE(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    params = forward_fn.init(rng0, y0)
+    params = mod.init(rng0, y0)
     
     def get_vars_dict(params, flat_keys):
         var_dict = FrozenDict(params)
@@ -267,7 +249,8 @@ def model_init(data: gdat.Input,
     state = {}  # 假设 state 是一个空字典
     aux = {}  # 假设 aux 是一个空字典
     const = {}  # 假设 const 是一个空字典
-    return Model(forward_fn, (params, state, aux, const, sparams), ol, name)
+    return Model(mod, (params, state, aux, const, sparams), ol, name)
+
 
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
