@@ -122,6 +122,7 @@ class VAE(nn.Module):
         return reconstructed_x, z_mean, z_logvar
 
 
+
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
     assert dtaps % sps, f'dtaps must be odd number, got {dtaps} instead'
@@ -236,7 +237,9 @@ def model_init(data: gdat.Input,
     mod = VAE(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    params = mod.init(rng0, y0)
+    key, subkey = random.split(rng0)  # 生成两个 key，一个用于 init，一个用于 forward
+    
+    params = mod.init(key, y0, subkey)  # 修改这里，传递两个 key
     
     def get_vars_dict(params, flat_keys):
         var_dict = FrozenDict(params)
