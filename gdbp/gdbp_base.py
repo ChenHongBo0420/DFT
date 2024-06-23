@@ -62,47 +62,77 @@ def reparameterize(key, mu, logvar):
     eps = jax.random.normal(key, std.shape)
     return mu + eps * std
 
-class VAE(nn.Module):
-    steps: int = 3
-    dtaps: int = 261
-    ntaps: int = 41
-    rtaps: int = 61
-    init_fn: tuple = (core.delta, core.gauss)
-    w0: float = 0.0
-    mode: str = 'train'
+# class VAE(nn.Module):
+#     steps: int = 3
+#     dtaps: int = 261
+#     ntaps: int = 41
+#     rtaps: int = 61
+#     init_fn: tuple = (core.delta, core.gauss)
+#     w0: float = 0.0
+#     mode: str = 'train'
 
-    def setup(self):
-        _assert_taps(self.dtaps, self.ntaps, self.rtaps)
+#     def setup(self):
+#         _assert_taps(self.dtaps, self.ntaps, self.rtaps)
 
-        d_init, n_init = self.init_fn
+#         d_init, n_init = self.init_fn
 
-        if self.mode == 'train':
-            self.mimo_train = True
-        elif self.mode == 'test':
-            self.mimo_train = cxopt.piecewise_constant([200000], [True, False])
-        else:
-            raise ValueError('invalid mode %s' % self.mode)
+#         if self.mode == 'train':
+#             self.mimo_train = True
+#         elif self.mode == 'test':
+#             self.mimo_train = cxopt.piecewise_constant([200000], [True, False])
+#         else:
+#             raise ValueError('invalid mode %s' % self.mode)
 
-        self.conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=self.rtaps)
-        self.conv1d1 = layer.vmap(layer.Conv1d)(name='Conv1d1', taps=self.rtaps)
+#         self.conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=self.rtaps)
+#         self.conv1d1 = layer.vmap(layer.Conv1d)(name='Conv1d1', taps=self.rtaps)
 
-        self.base_layers = [
-            layer.FDBP(steps=self.steps, dtaps=self.dtaps, ntaps=self.ntaps, d_init=d_init, n_init=n_init),
-            layer.BatchPowerNorm(mode=self.mode),
-            layer.MIMOFOEAf(name='FOEAf', w0=self.w0, train=self.mimo_train, preslicer=core.conv1d_slicer(self.rtaps), foekwargs={}),
-            layer.vmap(layer.Conv1d)(name='RConv', taps=self.rtaps),
-            layer.MIMOAF(train=self.mimo_train)
-        ]
+#         self.base_layers = [
+#             layer.FDBP(steps=self.steps, dtaps=self.dtaps, ntaps=self.ntaps, d_init=d_init, n_init=n_init),
+#             layer.BatchPowerNorm(mode=self.mode),
+#             layer.MIMOFOEAf(name='FOEAf', w0=self.w0, train=self.mimo_train, preslicer=core.conv1d_slicer(self.rtaps), foekwargs={}),
+#             layer.vmap(layer.Conv1d)(name='RConv', taps=self.rtaps),
+#             layer.MIMOAF(train=self.mimo_train)
+#         ]
 
-        self.decoder = Decoder(base_layers=self.base_layers)
+#         self.decoder = Decoder(base_layers=self.base_layers)
 
-    def __call__(self, x, key):
-        z_mean, z_logvar = self.conv1d(x), self.conv1d1(x)
-        z = reparameterize(key, z_mean, z_logvar)
-        reconstructed_x = self.decoder(z, x)
-        return reconstructed_x, z_mean, z_logvar
+#     def __call__(self, x, key):
+#         z_mean, z_logvar = self.conv1d(x), self.conv1d1(x)
+#         z = reparameterize(key, z_mean, z_logvar)
+#         reconstructed_x = self.decoder(z, x)
+#         return reconstructed_x, z_mean, z_logvar
 
+def make_base_module(steps: int = 3,
+                     dtaps: int = 261,
+                     ntaps: int = 41,
+                     rtaps: int = 61,
+                     init_fn: tuple = (core.delta, core.gauss),
+                     w0 = 0.,
+                     mode: str = 'train'):
 
+    _assert_taps(dtaps, ntaps, rtaps)
+
+    d_init, n_init = init_fn
+
+    if mode == 'train':
+        mimo_train = True
+    elif mode == 'test':
+        mimo_train = cxopt.piecewise_constant([200000], [True, False])
+    else:
+        raise ValueError('invalid mode %s' % mode)
+ 
+    base_layers = [
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
+        layer.BatchPowerNorm(mode=mode),
+        layer.MIMOFOEAf(name='FOEAf', w0=w0, train=mimo_train, preslicer=core.conv1d_slicer(rtaps), foekwargs={}),
+        layer.vmap(layer.Conv1d)(name='RConv', taps=rtaps),
+        layer.MIMOAF(train=mimo_train)
+    ]
+      
+    base = layer.Serial(*base_layers)
+    
+    def __call__(self, x):
+        return base
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
@@ -192,47 +222,18 @@ def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
-               sps: int = 2,
-               name: str = 'Model'):
-    ''' 
-    Initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
-    depending on given N-filter length and trainable parameters
-
-    Args:
-        data:
-        base_conf: a dict of kwargs to make base module, see `make_base_module`
-        sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
-            For example, assume base module has parameters represented as nested dict
-            {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
-             {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
-             of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
-            regexp key is supported.
-        n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
-            memory
-        sps: sample per symbol. Only integer sps is supported now.
-
-    Returns:
-        an initialized model wrapped by a namedtuple
-    '''
+               sps : int = 2,
+               name='Model'):
     
-    mod = VAE(**base_conf, w0=data.w0)
+    mod = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    key, subkey = random.split(rng0)  # 生成两个 key，一个用于 init，一个用于 forward
-    
-    params = mod.init(key, y0, subkey)  # 修改这里，传递两个 key
-    
-    def get_vars_dict(params, flat_keys):
-        var_dict = FrozenDict(params)
-        flattened_dict = jax.tree_util.tree_flatten(var_dict)[0]
-        filtered_dict = {k: v for k, v in flattened_dict if any(fk in k for fk in flat_keys)}
-        return filtered_dict
-
-    ol = data.y.shape[0] - y0.shape[0]
-    sparams = get_vars_dict(params, sparams_flatkeys)
-    state = {}  # 假设 state 是一个空字典
-    aux = {}  # 假设 aux 是一个空字典
-    const = {}  # 假设 const 是一个空字典
+    z0, v0 = mod.init(rng0, core.Signal(y0))
+    ol = z0.t.start - z0.t.stop
+    sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+    state = v0['af_state']
+    aux = v0['aux_inputs']
+    const = v0['const']
     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
 
