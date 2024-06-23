@@ -49,6 +49,7 @@ Dict = Union[dict, flax.core.FrozenDict]
 
 class Encoder(nn.Module):
     conv1d: nn.Module
+    conv1d1: nn.Module
     hidden_dim: int
     z_dim: int
 
@@ -95,7 +96,7 @@ class VAE(nn.Module):
 
         self.conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=self.rtaps)
         self.conv1d1 = layer.vmap(layer.Conv1d)(name='Conv1d1', taps=self.rtaps)
-        self.encoder = Encoder(conv1d=self.conv1d, hidden_dim=self.hidden_dim, z_dim=self.z_dim)
+        self.encoder = Encoder(conv1d=self.conv1d, covn1d=self.conv1d1)
 
         self.base_layers = [
             layer.FDBP(steps=self.steps, dtaps=self.dtaps, ntaps=self.ntaps, d_init=d_init, n_init=n_init),
