@@ -224,7 +224,7 @@ def fdbp_init(a: dict,
 #     const = v0['const']
 #     return Model(mod, (params, state, aux, const, sparams), ol, name)
 
-ef model_init(data: gdat.Input,
+def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
