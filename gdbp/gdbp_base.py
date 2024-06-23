@@ -58,6 +58,8 @@ class Decoder(nn.Module):
         return self.base_module(combined)
      
 def reparameterize(key, mu, logvar):
+    mu = jnp.asarray(mu)
+    logvar = jnp.asarray(logvar)
     std = jnp.exp(0.5 * logvar)
     eps = jax.random.normal(key, std.shape)
     return mu + eps * std
