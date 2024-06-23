@@ -48,21 +48,13 @@ Dict = Union[dict, flax.core.FrozenDict]
 #     return base
 
 class Encoder(nn.Module):
-    input_dim: int
+    conv1d: nn.Module
     hidden_dim: int
     z_dim: int
 
-    def setup(self):
-        self.dense_hidden = nn.Dense(self.hidden_dim)
-        self.dense_mean = nn.Dense(self.z_dim)
-        self.dense_logvar = nn.Dense(self.z_dim)
-
     def __call__(self, x):
-        x = self.dense_hidden(x)
-        x = nn.relu(x) 
-        x = x.reshape((x.shape[0], -1))  # Flatten the output for the dense layers
-        z_mean = self.dense_mean(x)
-        z_logvar = self.dense_logvar(x)
+        z_mean = self.conv1d(x)
+        z_logvar = self.conv1d1(x)
         return z_mean, z_logvar
  
 class Decoder(nn.Module):
@@ -88,9 +80,6 @@ class VAE(nn.Module):
     init_fn: tuple = (core.delta, core.gauss)
     w0: float = 0.0
     mode: str = 'train'
-    input_dim: int = 784  # Example input dimension, adjust as needed
-    hidden_dim: int = 128
-    z_dim: int = 20
 
     def setup(self):
         _assert_taps(self.dtaps, self.ntaps, self.rtaps)
@@ -104,7 +93,9 @@ class VAE(nn.Module):
         else:
             raise ValueError('invalid mode %s' % self.mode)
 
-        self.encoder = Encoder(input_dim=self.input_dim, hidden_dim=self.hidden_dim, z_dim=self.z_dim)
+        self.conv1d = layer.vmap(layer.Conv1d)(name='Conv1d', taps=self.rtaps)
+        self.conv1d1 = layer.vmap(layer.Conv1d)(name='Conv1d1', taps=self.rtaps)
+        self.encoder = Encoder(conv1d=self.conv1d, hidden_dim=self.hidden_dim, z_dim=self.z_dim)
 
         self.base_layers = [
             layer.FDBP(steps=self.steps, dtaps=self.dtaps, ntaps=self.ntaps, d_init=d_init, n_init=n_init),
