@@ -120,7 +120,9 @@ def make_base_module(steps: int = 3,
         mimo_train = cxopt.piecewise_constant([200000], [True, False])
     else:
         raise ValueError('invalid mode %s' % mode)
- 
+    base_layers1 = [
+        layer.vmap(layer.Conv1d)(name='Conv', taps=rtaps),
+    ]
     base_layers = [
         layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
         layer.BatchPowerNorm(mode=mode),
@@ -130,9 +132,9 @@ def make_base_module(steps: int = 3,
     ]
       
     base = layer.Serial(*base_layers)
+    base1 = layer.Serial(*base_layers1)
     
-    def __call__(self, x):
-        return base
+    return base, base1
 
 def _assert_taps(dtaps, ntaps, rtaps, sps=2):
     ''' we force odd taps to ease coding '''
