@@ -65,10 +65,15 @@ class Encoder(nn.Module):
         return z_mean, z_logvar
      
 class Decoder(nn.Module):
-    base_module: nn.Module
+    base_layers: list
+
+    def setup(self):
+        self.base_module = nn.Sequential(self.base_layers)
 
     def __call__(self, z, x):
-        return self.base_module(jnp.concatenate([x, z], axis=-1))
+        # Concatenate z and x along the feature dimension
+        combined = jnp.concatenate([x, z], axis=-1)
+        return self.base_module(combined)
      
 def reparameterize(key, mu, logvar):
     std = jnp.exp(0.5 * logvar)
@@ -184,13 +189,50 @@ def fdbp_init(a: dict,
     return d_init, n_init
 
 
+# def model_init(data: gdat.Input,
+#                base_conf: dict,
+#                sparams_flatkeys: list,
+#                n_symbols: int = 4000,
+#                sps : int = 2,
+#                name='Model'):
+#     ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
+#     depending on given N-filter length and trainable parameters
+
+#     Args:
+#         data:
+#         base_conf: a dict of kwargs to make base module, see `make_base_module`
+#         sparams_flatkeys: a list of keys contains the static(nontrainable) parameters.
+#             For example, assume base module has parameters represented as nested dict
+#             {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
+#              {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
+#              of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
+#             regexp key is supportted.
+#         n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
+#             memory
+#         sps: sample per symbol. Only integer sps is supported now.
+
+#     Returns:
+#         a initialized model wrapped by a namedtuple
+#     '''
+    
+#     mod = make_base_module(**base_conf, w0=data.w0)
+#     y0 = data.y[:n_symbols * sps]
+#     rng0 = random.PRNGKey(0)
+#     z0, v0 = mod.init(rng0, core.Signal(y0))
+#     ol = z0.t.start - z0.t.stop
+#     sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
+#     state = v0['af_state']
+#     aux = v0['aux_inputs']
+#     const = v0['const']
+#     return Model(mod, (params, state, aux, const, sparams), ol, name)
 def model_init(data: gdat.Input,
                base_conf: dict,
                sparams_flatkeys: list,
                n_symbols: int = 4000,
-               sps : int = 2,
-               name='Model'):
-    ''' initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
+               sps: int = 2,
+               name: str = 'Model'):
+    ''' 
+    Initialize model from base template, generating CDC, DBP, EDBP, FDBP, GDBP
     depending on given N-filter length and trainable parameters
 
     Args:
@@ -201,26 +243,34 @@ def model_init(data: gdat.Input,
             {'color': 'red', 'size': {'width': 1, 'height': 2}}, its flatten layout is dict
              {('color',): 'red', ('size', 'width',): 1, ('size', 'height'): 2}, a sparams_flatkeys
              of [('color',): ('size', 'width',)] means 'color' and 'size/width' parameters are static.
-            regexp key is supportted.
+            regexp key is supported.
         n_symbols: number of symbols used to initialize model, use the minimal value greater than channel
             memory
         sps: sample per symbol. Only integer sps is supported now.
 
     Returns:
-        a initialized model wrapped by a namedtuple
+        an initialized model wrapped by a namedtuple
     '''
     
-    mod, z1, z2 = make_base_module(**base_conf, w0=data.w0)
+    forward_fn = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
-    z0, v0 = mod.init(rng0, core.Signal(y0))
-    ol = z0.t.start - z0.t.stop
-    sparams, params = util.dict_split(v0['params'], sparams_flatkeys)
-    state = v0['af_state']
-    aux = v0['aux_inputs']
-    const = v0['const']
-    return Model(mod, (params, state, aux, const, sparams), ol, name)
-  
+    params = forward_fn.init(rng0, y0)
+    
+    # 获取层的名字和值的映射
+    def get_vars_dict(params, flat_keys):
+        var_dict = FrozenDict(params)
+        flattened_dict = jax.tree_util.tree_flatten(var_dict)[0]
+        filtered_dict = {k: v for k, v in flattened_dict if any(fk in k for fk in flat_keys)}
+        return filtered_dict
+
+    ol = data.y.shape[0] - y0.shape[0]
+    sparams = get_vars_dict(params, sparams_flatkeys)
+    state = {}  # 假设 state 是一个空字典
+    aux = {}  # 假设 aux 是一个空字典
+    const = {}  # 假设 const 是一个空字典
+    return Model(forward_fn, (params, state, aux, const, sparams), ol, name)
+
 def l2_normalize(x, axis=None, epsilon=1e-12):
     square_sum = jnp.sum(jnp.square(x), axis=axis, keepdims=True)
     x_inv_norm = jnp.sqrt(jnp.maximum(square_sum, epsilon))
