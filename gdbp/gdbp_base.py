@@ -210,7 +210,7 @@ def model_init(data: gdat.Input,
         a initialized model wrapped by a namedtuple
     '''
     
-    mod = make_base_module(**base_conf, w0=data.w0)
+    mod, z1, z2 = make_base_module(**base_conf, w0=data.w0)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z0, v0 = mod.init(rng0, core.Signal(y0))
