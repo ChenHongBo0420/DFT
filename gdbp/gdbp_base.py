@@ -142,10 +142,10 @@ def make_base_module(steps: int = 3,
         layer.MIMOAF(train=mimo_train)
     ]
     base_layers1 = [
-        layer.vmap(layer.Conv1d)(name='Conv', taps=rtaps),
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
     ]
     base_layers2 = [
-        layer.vmap(layer.Conv1d)(name='Conv1', taps=rtaps),
+        layer.FDBP(steps=steps, dtaps=dtaps, ntaps=ntaps, d_init=d_init, n_init=n_init),
     ]
     base = layer.Serial(*base_layers)
     base1 = layer.Serial(*base_layers1)
