@@ -58,8 +58,12 @@ class Decoder(nn.Module):
         return self.base_module(combined)
      
 def reparameterize(key, mu, logvar):
-    mu = jnp.asarray(mu)
-    logvar = jnp.asarray(logvar)
+    try:
+        mu = jnp.asarray(mu, dtype=jnp.float32)
+        logvar = jnp.asarray(logvar, dtype=jnp.float32)
+    except TypeError as e:
+        raise TypeError(f"Invalid input data type: mu={mu}, logvar={logvar}. Error: {e}")
+
     std = jnp.exp(0.5 * logvar)
     eps = jax.random.normal(key, std.shape)
     return mu + eps * std
