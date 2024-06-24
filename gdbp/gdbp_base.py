@@ -231,7 +231,20 @@ def model_init(data: gdat.Input,
                name='Model'):
     
     mod, mod1, mod2 = make_base_module(**base_conf, w0=data.w0)
-    print(mod1)
+    print(f"mod1: {mod1}, type: {type(mod1)}")
+    print(f"mod2: {mod2}, type: {type(mod2)}")
+
+    # Ensure mod1 and mod2 are jax numpy arrays and convert them if necessary
+    try:
+        if not isinstance(mod1, jnp.ndarray):
+            mod1 = jnp.asarray(mod1, dtype=jnp.float32)
+        if not isinstance(mod2, jnp.ndarray):
+            mod2 = jnp.asarray(mod2, dtype=jnp.float32)
+    except TypeError as e:
+        raise TypeError(f"Invalid input data type in mod1 or mod2. Error: {e}")
+    
+    print(f"Converted mod1: {mod1}, type: {type(mod1)}")
+    print(f"Converted mod2: {mod2}, type: {type(mod2)}")
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z = reparameterize(rng0, mod1, mod2)
