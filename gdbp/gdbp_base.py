@@ -58,19 +58,6 @@ class Decoder(nn.Module):
         return self.base_module(combined)
      
 def reparameterize(key, mu, logvar):
-    try:
-        print("mu:", mu)
-        print("logvar:", logvar)
-        
-        mu = jnp.asarray(mu, dtype=jnp.float32)
-        logvar = jnp.asarray(logvar, dtype=jnp.float32)
-        
-        assert mu.shape == logvar.shape, "Shapes of mu and logvar must match"
-    except TypeError as e:
-        raise TypeError(f"Invalid input data type: mu={mu}, logvar={logvar}. Error: {e}")
-    except AssertionError as e:
-        raise ValueError(f"Shape mismatch: mu.shape={mu.shape}, logvar.shape={logvar.shape}. Error: {e}")
-
     std = jnp.exp(0.5 * logvar)
     eps = jax.random.normal(key, std.shape)
     return mu + eps * std
