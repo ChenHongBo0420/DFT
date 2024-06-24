@@ -231,6 +231,7 @@ def model_init(data: gdat.Input,
                name='Model'):
     
     mod, mod1, mod2 = make_base_module(**base_conf, w0=data.w0)
+    print(mod1)
     y0 = data.y[:n_symbols * sps]
     rng0 = random.PRNGKey(0)
     z = reparameterize(rng0, mod1, mod2)
