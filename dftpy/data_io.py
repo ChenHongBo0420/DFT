@@ -24,7 +24,22 @@ from pymatgen.io.vasp.outputs import Poscar
 # 关键：re-export 指纹相关工具，供其它模块直接 import
 # -----------------------------------------------------------------------------
 from .fp import fp_atom, fp_norm        # ⭐️ 新增
+# ----------------- 为兼容旧代码而做的 *唯一* 包装 ----------------- #
+# CLI 默认超参数保持和 chg.py 里一致；需要别的值就显式传 fp_atom
+_DEFAULTS = dict(grid_spacing=0.7,
+                 cut_off_rad=5.0,
+                 widest_gaussian=6.0,
+                 narrowest_gaussian=0.5,
+                 num_gamma=18)
 
+def _fp_atom_default(struct):
+    """data_io 内部统一走这个包装，省得每处都改 6 个参数"""
+    return fp_atom(struct,
+                   _DEFAULTS["grid_spacing"],
+                   _DEFAULTS["cut_off_rad"],
+                   _DEFAULTS["widest_gaussian"],
+                   _DEFAULTS["narrowest_gaussian"],
+                   _DEFAULTS["num_gamma"])
 # --------------------------- 基础常量 / 简单工具 -----------------------------
 # Mapping from atomic number to valence electrons
 elec_dict = {6: 4, 1: 1, 7: 5, 8: 6}
@@ -195,9 +210,10 @@ def get_all_data(data_list: list):
         vol, supercell, dim, total_elec, elems_list, poscar_data = get_def_data(folder)
         El_list.append([total_elec])
 
-        dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(poscar_data,
-                                                                  supercell,
-                                                                  elems_list)
+        # dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(poscar_data,
+        #                                                           supercell,
+        #                                                           elems_list)
+        dset, basis_mat, sites_elem, num_atoms, at_elem = _fp_atom_default(supercell)
         At_list.append([num_atoms])
         dataset1 = dset.copy()
 
@@ -240,8 +256,9 @@ def get_efp_data(data_list: list):
         vol, supercell, dim, total_elec, elems_list, poscar_data = get_def_data(folder)
         El_list.append([total_elec])
 
-        dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(
-            poscar_data, supercell, elems_list)
+        # dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(
+        #     poscar_data, supercell, elems_list)
+        dset, basis_mat, sites_elem, num_atoms, at_elem = _fp_atom_default(supercell)
         At_list.append([num_atoms])
         X_pre_list.append(dset.copy())
         basis_pre_list.append(basis_mat.copy())
@@ -360,8 +377,9 @@ def get_e_dos_data(data_list: list):
         vol, supercell, dim, total_elec, elems_list, poscar_data = get_def_data(folder)
         El_list.append([total_elec])
 
-        dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(
-            poscar_data, supercell, elems_list)
+        # dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(
+        #     poscar_data, supercell, elems_list)
+        dset, basis_mat, sites_elem, num_atoms, at_elem = _fp_atom_default(supercell)
         At_list.append([num_atoms])
         X_pre_list.append(dset.copy())
         basis_pre_list.append(basis_mat.copy())
@@ -397,7 +415,8 @@ def get_dos_data(data_list: list):
         vol, supercell, dim, total_elec, elems_list, poscar_data = get_def_data(folder)
         El_list.append([total_elec])
 
-        dset, _, _, num_atoms, at_elem = fp_atom(poscar_data, supercell, elems_list)
+        # dset, _, _, num_atoms, at_elem = fp_atom(poscar_data, supercell, elems_list)
+        dset, basis_mat, sites_elem, num_atoms, at_elem = _fp_atom_default(supercell)
         At_list.append([num_atoms])
         X_pre_list.append(dset.copy())
         X_at_elem.append(at_elem)
@@ -460,3 +479,4 @@ __all__ = [
     "get_all_data", "get_efp_data", "pad_dat", "pad_efp_data", "pad_dos_dat",
     "get_e_dos_data", "get_dos_data", "get_dos_e_train_data",
 ]
+__all__.append("_fp_atom_default")
