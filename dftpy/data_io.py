@@ -304,47 +304,107 @@ def pad_dat(X_at_elem: np.ndarray, X_pre_list: list, padding_size: int):
 
 
 # ==== pad_efp_data ==========================================================
-def pad_efp_data(X_at_elem: np.ndarray, X_pre_list: list, forces_pre_list: list,
-                 basis_pre_list: list, padding_size: int):
+import numpy as np
+
+def pad_efp_data(
+    X_at_elem: np.ndarray,
+    X_pre_list: list,
+    forces_pre_list: list,
+    basis_pre_list: list,
+    padding_size: int
+):
+    """
+    Pads and arranges fingerprint, basis, and force data for a batch of samples,
+    then slices them into per-element segments along the feature dimension.
+    Also constructs one-hot masks C_m, H_m, N_m, O_m for atomic counts.
+
+    Args:
+        X_at_elem:     np.ndarray of shape (n_samples, 4), giving atom counts [C, H, N, O] per sample.
+        X_pre_list:    list of datasets (one per sample) to pass to get_fp_basis_F.
+        forces_pre_list: list of force data arrays (one per sample).
+        basis_pre_list:  list of basis matrix arrays (one per sample).
+        padding_size:  int, number of padding points per sample.
+
+    Returns:
+        A tuple containing:
+            forces1, forces2, forces3, forces4: each of shape (n_samples, padding_size, 3)
+            X_1, X_2, X_3, X_4:               each of shape (n_samples, padding_size, 360)
+            basis1, basis2, basis3, basis4:   each of shape (n_samples, padding_size, 9)
+            C_m, H_m, N_m, O_m:               each of shape (n_samples, padding_size, 1)
+    """
+
     X_list, basis_list, forces_list = [], [], []
     C_list, H_list, N_list, O_list = [], [], [], []
 
-    for at_elem, dset, forces_data, basis_mat in zip(X_at_elem, X_pre_list,
-                                                     forces_pre_list, basis_pre_list):
+    # Loop over samples
+    for at_elem, dset, forces_data, basis_mat in zip(
+        X_at_elem, X_pre_list, forces_pre_list, basis_pre_list
+    ):
+        # get_fp_basis_F returns arrays of shape (padding_size, feat_dim)
         X_pad, basis_pad, forces_pad = get_fp_basis_F(
-            at_elem, dset, forces_data, basis_mat, padding_size)
-        X_list.append(X_pad.T); basis_list.append(basis_pad.T); forces_list.append(forces_pad.T)
+            at_elem, dset, forces_data, basis_mat, padding_size
+        )
+        # Append without transposing
+        X_list.append(X_pad)           # (padding_size, 1440)
+        basis_list.append(basis_pad)   # (padding_size, 36)
+        forces_list.append(forces_pad) # (padding_size, 12)
 
-        C_at = np.zeros((padding_size,), np.float32); C_at[: at_elem[0]] = 1.0
-        H_at = np.zeros((padding_size,), np.float32); H_at[: at_elem[1]] = 1.0
-        N_at = np.zeros((padding_size,), np.float32); N_at[: at_elem[2]] = 1.0
-        O_at = np.zeros((padding_size,), np.float32); O_at[: at_elem[3]] = 1.0
+        # Build one-hot–style masks for C, H, N, O counts
+        # at_elem = [n_C, n_H, n_N, n_O]
+        C_at = np.zeros((padding_size,), dtype=np.float32)
+        C_at[: at_elem[0]] = 1.0
+        H_at = np.zeros((padding_size,), dtype=np.float32)
+        H_at[: at_elem[1]] = 1.0
+        N_at = np.zeros((padding_size,), dtype=np.float32)
+        N_at[: at_elem[2]] = 1.0
+        O_at = np.zeros((padding_size,), dtype=np.float32)
+        O_at[: at_elem[3]] = 1.0
 
-        C_list.append(C_at); H_list.append(H_at); N_list.append(N_at); O_list.append(O_at)
+        C_list.append(C_at)  # shape (padding_size,)
+        H_list.append(H_at)
+        N_list.append(N_at)
+        O_list.append(O_at)
 
-    X_stack      = np.vstack(X_list)
-    basis_stack  = np.vstack(basis_list)
-    forces_stack = np.vstack(forces_list)
+    # Stack lists into arrays:
+    #   X_arr:      (n_samples, padding_size, 1440)
+    #   basis_arr:  (n_samples, padding_size, 36)
+    #   forces_arr: (n_samples, padding_size, 12)
+    X_arr      = np.stack(X_list,      axis=0)
+    basis_arr  = np.stack(basis_list,  axis=0)
+    forces_arr = np.stack(forces_list, axis=0)
 
-    tot_conf = X_stack.shape[0] // (4 * padding_size)
-    feat_dim = X_list[0].shape[0]
-    X_3D      = X_stack.reshape(tot_conf, 4, padding_size, feat_dim)
-    basis_3D  = basis_stack.reshape(tot_conf, 4, padding_size, 9)
-    forces_3D = forces_stack.reshape(tot_conf, 4, padding_size, 3)
+    n_samples = X_arr.shape[0]
 
-    X_1, X_2, X_3, X_4 = (X_3D[:, i, :, :] for i in range(4))
-    basis1, basis2, basis3, basis4 = (basis_3D[:, i, :, :] for i in range(4))
-    forces1, forces2, forces3, forces4 = (forces_3D[:, i, :, :] for i in range(4))
+    # Slice fingerprint features into four 360‐dim segments:
+    X_1 = X_arr[:, :,     0:360]    # (n_samples, padding_size, 360)
+    X_2 = X_arr[:, :,   360:720]    # (n_samples, padding_size, 360)
+    X_3 = X_arr[:, :,   720:1080]   # (n_samples, padding_size, 360)
+    X_4 = X_arr[:, :, 1080:1440]    # (n_samples, padding_size, 360)
 
-    C_m = np.vstack(C_list).reshape(tot_conf, padding_size, 1)
-    H_m = np.vstack(H_list).reshape(tot_conf, padding_size, 1)
-    N_m = np.vstack(N_list).reshape(tot_conf, padding_size, 1)
-    O_m = np.vstack(O_list).reshape(tot_conf, padding_size, 1)
+    # Slice basis features into four 9‐dim segments:
+    basis1 = basis_arr[:, :,   0:9]   # (n_samples, padding_size, 9)
+    basis2 = basis_arr[:, :,   9:18]  # (n_samples, padding_size, 9)
+    basis3 = basis_arr[:, :,  18:27]  # (n_samples, padding_size, 9)
+    basis4 = basis_arr[:, :,  27:36]  # (n_samples, padding_size, 9)
 
-    return (forces1, forces2, forces3, forces4,
-            X_1, X_2, X_3, X_4,
-            basis1, basis2, basis3, basis4,
-            C_m, H_m, N_m, O_m)
+    # Slice force vectors into four 3‐dim segments:
+    forces1 = forces_arr[:, :,   0:3]  # (n_samples, padding_size, 3)
+    forces2 = forces_arr[:, :,   3:6]  # (n_samples, padding_size, 3)
+    forces3 = forces_arr[:, :,   6:9]  # (n_samples, padding_size, 3)
+    forces4 = forces_arr[:, :,  9:12]  # (n_samples, padding_size, 3)
+
+    # Stack element‐mask lists and reshape into (n_samples, padding_size, 1)
+    C_m = np.stack(C_list, axis=0).reshape(n_samples, padding_size, 1)
+    H_m = np.stack(H_list, axis=0).reshape(n_samples, padding_size, 1)
+    N_m = np.stack(N_list, axis=0).reshape(n_samples, padding_size, 1)
+    O_m = np.stack(O_list, axis=0).reshape(n_samples, padding_size, 1)
+
+    return (
+        forces1, forces2, forces3, forces4,
+        X_1, X_2, X_3, X_4,
+        basis1, basis2, basis3, basis4,
+        C_m, H_m, N_m, O_m
+    )
 
 
 # ==== pad_dos_dat ===========================================================
