@@ -9,6 +9,13 @@ from torch.utils.data import Dataset, DataLoader
 
 from pymatgen.io.vasp.outputs import Poscar
 
+# dftpy/energy.py 顶部
+__all__ = [
+    "train_energy_model",
+    "load_pretrained_energy_model",
+    "infer_energy",
+]
+
 # ------------------------------------------------------------------------------
 # Constants and device
 # ------------------------------------------------------------------------------
@@ -666,3 +673,51 @@ def infer_energy(
     forces = np.vstack(forces_list)  # shape=(num_atoms,3)
 
     return energy, forces, stress
+
+def train_energy_model(train_folders, val_folders, chg_model, padding_size, args):
+    """
+    CLI -> dftpy.energy.train_energy_model(...) 的统一入口。
+    内部仍调用你先前写好的 retrain_emodel。
+    """
+    import numpy as np
+    from .data_io import get_efp_data, pad_efp_data, fp_norm, get_dos_e_train_data
+
+    # 0) 读入数据，做一次 padding & 特征准备
+    # ------------------------------------------------------------------
+    ener_ref, forces_pre, press_ref, X_pre, basis_pre, X_at, X_el, X_elem = \
+        get_efp_data(train_folders)
+    ener_val, forces_val, press_val, X_val_pre, basis_val_pre, X_at_val, X_el_val, X_elem_val = \
+        get_efp_data(val_folders)
+
+    padding_size = int(padding_size)   # 保持一致
+
+    # 把指纹 / 基函数 / 力 全部 pad 到统一的 padding_size
+    forces1, forces2, forces3, forces4,\
+    X_1, X_2, X_3, X_4,\
+    basis1, basis2, basis3, basis4,\
+    C_m, H_m, N_m, O_m = pad_efp_data(X_elem,     X_pre,     forces_pre,     basis_pre,     padding_size)
+    forcesV1, forcesV2, forcesV3, forcesV4,\
+    X_1V, X_2V, X_3V, X_4V,\
+    basis1V, basis2V, basis3V, basis4V,\
+    C_mV, H_mV, N_mV, O_mV = pad_efp_data(X_elem_val, X_val_pre, forces_val, basis_val_pre, padding_size)
+
+    # 调电荷模型对所有样本做一次“电荷加权 + 归一化”
+    X_C,  X_H,  X_N,  X_O  = fp_norm(X_1,  X_2,  X_3,  X_4,  padding_size)
+    X_CV, X_HV, X_NV, X_OV = fp_norm(X_1V, X_2V, X_3V, X_4V, padding_size)
+
+    # 1) 直接把数据喂给你原先的 retrain_emodel
+    # ------------------------------------------------------------------
+    retrain_emodel(
+        X_C, X_H, X_N, X_O,
+        C_m, H_m, N_m, O_m,
+        basis1, basis2, basis3, basis4,
+        X_at, ener_ref, forces1, forces2, forces3, forces4, press_ref,
+        X_CV, X_HV, X_NV, X_OV,
+        C_mV, H_mV, N_mV, O_mV,
+        basis1V, basis2V, basis3V, basis4V,
+        X_at_val, ener_val, forcesV1, forcesV2, forcesV3, forcesV4, press_val,
+        epochs      = args.epochs,
+        batch_size  = args.batch_size,
+        patience    = args.patience,
+        padding_size= padding_size
+    )
