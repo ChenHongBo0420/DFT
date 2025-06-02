@@ -255,4 +255,4 @@ def train_chg_model(
             # --------------------------------------------------------------
             coef_C = np.load(folder / "Coef_C.npy") if (folder / "Coef_C.npy").exists() else np.zeros((0, 340))
             coef_H = np.load(folder / "Coef_H.npy") if (folder / "Coef_H.npy").exists() else np.zeros((0, 208))
-            coef_N = np.load(folder / "Coef_N.npy").
+            coef_N = np.load(folder / "Coef_N.npy")
