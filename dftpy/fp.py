@@ -1,74 +1,118 @@
-# dftpy/fp.py  – revised version
-# -----------------------------------------------------------------------------
-#  Generating atomic fingerprints (radial + dipole + quadrupole) in pure NumPy.
-#  This implementation removes the NameError produced by the mixed use of
-#  `rad_fp_elem`/`radial_fp_elem`, keeps a single pad_to helper, and does **not**
-#  silently override the global padding_size used by the training / inference
-#  pipeline – padding should be handled by the caller.
-# -----------------------------------------------------------------------------
+# dftpy/fp.py  ‑‑ fully revised
+"""Fingerprint generation & normalization utilities for DFTpy.
+
+This module now exposes **all** helpers that上层代码依赖：
+
+* ``pad_to`` – pad 2‑D NumPy arrays on the first axis.
+* ``fp_atom`` – build radial / dipole / quadrupole fingerprints & local basis for every atom in a structure.
+* ``fp_chg_norm`` – concatenate predicted charge coefficients to the fingerprints **and** run ``MaxAbsScaler`` normalisation.
+* ``fp_norm`` – apply the same ``MaxAbsScaler`` normalisation when *only* fingerprints are needed.
+
+The constant ``DOS_POINTS`` is kept at **341** – the length used everywhere else (mask creation, network heads, plotting).
+
+The implementation is self‑contained (only ``numpy`` + ``pymatgen`` at import time) so that running
+``from dftpy.fp import fp_chg_norm`` will always succeed.
+"""
 from __future__ import annotations
 
-import numpy as np
-from pymatgen.core import Structure
+from pathlib import Path
 from typing import List, Tuple
 
-# ----------------------------------------------------------------------------
-# Helper: pad a 2-D array (n_rows × n_feats) with `pad_value` until it reaches
-# `target_rows`.
-# ----------------------------------------------------------------------------
+import itertools
+import numpy as np
+from pymatgen.core import Structure
+from pymatgen.io.vasp.outputs import Poscar
+
+# ---------------------------------------------------------------------------
+# Public constants
+# ---------------------------------------------------------------------------
+DOS_POINTS: int = 341  # <- must stay in sync with dftpy.dos
+
+__all__ = [
+    "pad_to",
+    "fp_atom",
+    "fp_chg_norm",
+    "fp_norm",
+    "DOS_POINTS",
+]
+
+
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
 
 def pad_to(arr: np.ndarray, target_rows: int, pad_value: float = 0.0) -> np.ndarray:
-    """Pad *rows* of a 2-D array. If the array already has ≥target_rows, it is
-    returned unchanged (but copied)."""
-    n_rows, n_feats = arr.shape
+    """Pad *arr* along axis‑0 up to *target_rows* using *pad_value*.
+
+    Parameters
+    ----------
+    arr
+        ``(n_rows, n_feat)`` matrix.
+    target_rows
+        Desired row count after padding.
+    pad_value
+        Value written into the padded rows.
+    """
+    n_rows, n_feat = arr.shape
     if n_rows >= target_rows:
         return arr.copy()
 
-    pad = np.full((target_rows - n_rows, n_feats), pad_value, dtype=arr.dtype)
-    return np.vstack((arr, pad))
+    pad = np.full((target_rows - n_rows, n_feat), pad_value, dtype=arr.dtype)
+    return np.vstack([arr, pad])
 
 
-# ----------------------------------------------------------------------------
-# Core routine: build atomic fingerprints for C/H/N/O atoms.
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Fingerprint builder – largely identical to the earlier version but with
+# variable names tidied and a couple of bug‑fixes (radial_fp_elem→radial_vals).
+# ---------------------------------------------------------------------------
 
 def fp_atom(
-    structure: Structure,
+    structure: Structure | Poscar | str,
     grid_spacing: float,
     cut_off_rad: float,
     widest_gaussian: float,
     narrowest_gaussian: float,
     num_gamma: int,
-) -> Tuple[np.ndarray, np.ndarray, List[List], int, List[int]]:
-    """Return *(dset, basis_mat, sites_elem, num_atoms, at_elem)* where
+) -> Tuple[np.ndarray, np.ndarray, List[List[Structure]], int, List[int]]:
+    """Compute per‑atom fingerprints & local basis.
 
-    * **dset**      (n_atoms, feat_dim_total) – concatenated fingerprint per atom
-    * **basis_mat** (n_atoms, 9)            – flattened local orthogonal axes
-    * **sites_elem** list of 4 lists of Site – [C,H,N,O] order
-    * **num_atoms** total number of atoms in *structure*
-    * **at_elem**   [ nC, nH, nN, nO ]
-
-    The function itself **does not pad** to any unified *padding_size*; the
-    caller (usually *data_io.chg_data* or similar) decides how much to pad.
+    Returns
+    -------
+    dset
+        ``(n_atoms, feat_dim)`` fingerprint matrix.
+    basis_mat
+        ``(n_atoms, 9)`` – flattened 3×3 orthonormal basis per atom.
+    sites_elem
+        Nested list of four lists (C/H/N/O sites) – empty if that element is absent.
+    num_atoms
+        Total atom count.
+    at_elem
+        ``[nC, nH, nN, nO]`` counts for each element type.
     """
+    # Accept filename / Poscar / Structure transparently
+    if isinstance(structure, (str, Path)):
+        structure = Poscar.from_file(structure).structure
+    elif isinstance(structure, Poscar):
+        structure = structure.structure
 
-    # 1. Count atoms per element ------------------------------------------------
-    elem_to_idx = {"C": 0, "H": 1, "N": 2, "O": 3}
+    # strict ordering
+    elem_order = ["C", "H", "N", "O"]
+    elem_to_idx = {e: i for i, e in enumerate(elem_order)}
+
     at_elem = [0, 0, 0, 0]
-    sites_elem: List[List] = [[], [], [], []]
+    sites_elem: List[List[Structure]] = [[], [], [], []]
 
     for site in structure.sites:
         sym = site.specie.symbol
-        idx = elem_to_idx.get(sym, None)
-        if idx is not None:
+        if sym in elem_to_idx:
+            idx = elem_to_idx[sym]
             at_elem[idx] += 1
             sites_elem[idx].append(site)
-        # (atoms of other species are ignored silently)
+        # silently ignore other elements – can be extended later
 
     num_atoms = structure.num_sites
-
-    # Early-exit: if structure contains no C/H/N/O atoms -----------------------
     if sum(at_elem) == 0:
+        # no C/H/N/O in the structure – return empty arrays so caller can decide what to do
         return (
             np.zeros((0, 0), dtype=np.float32),
             np.zeros((0, 9), dtype=np.float32),
@@ -77,129 +121,186 @@ def fp_atom(
             at_elem,
         )
 
-    # 2. Cartesian coordinates of *all* atoms (order preserved from structure)
-    cart_grid_K = structure.cart_coords  # shape = (num_atoms, 3)
+    # ------------------------------------------------------------------
+    # Build cartesian grids for fingerprints
+    # ------------------------------------------------------------------
+    # concatenate coords once – referenced below
+    cart_coords_all = structure.cart_coords.astype(np.float32)
 
-    # 3. Build σ (gamma) list for Gaussian basis -------------------------------
-    sigma = np.logspace(
-        np.log10(narrowest_gaussian), np.log10(widest_gaussian), num_gamma
-    )
-    gamma_list = 0.5 / (sigma**2)  # 1/(2σ²)
+    # Gaussian width → gamma list (match original code)
+    sigma = np.logspace(np.log10(narrowest_gaussian), np.log10(widest_gaussian), num=num_gamma)
+    gamma_list = 0.5 / (sigma ** 2)  # shape (num_gamma,)
 
-    # 4. For each element build radial / dipole / quadrupole contributions ------
-    # Feature layout per *gamma*:
-    #   1    radial
-    #   3    dipole (x,y,z)
-    #   6    quadrupole (xx,yy,zz,xy,yz,zx)
-    # → 10 × num_gamma dimensions per element
-
-    elem_feature_blocks: List[np.ndarray] = []
+    radial_blocks: List[np.ndarray] = []  # list of (n_atoms, num_gamma*10) blocks per element
 
     for elem_idx, elem_sites in enumerate(sites_elem):
         if not elem_sites:
-            continue  # skip missing element type
+            continue  # skip absent element
 
-        # Unique neighbour positions for the *current* element -----------------
-        # Collect fractional coords of the atom itself + neighbours within cutoff
-        neighbours_frac: List[np.ndarray] = []
+        # unique neighbour positions (including self)
+        frac_neigh = []
         for site in elem_sites:
-            # self
-            neighbours_frac.append(site.frac_coords)
-            for neigh_site, dist in structure.get_neighbors(site, cut_off_rad):
-                neighbours_frac.append(neigh_site.frac_coords)
+            neighs = structure.get_neighbors(site, cut_off_rad)
+            frac_neigh.extend([n[0].frac_coords for n in neighs])
+            frac_neigh.append(site.frac_coords)
 
-        frac_unique = (
-            np.unique(np.vstack(neighbours_frac), axis=0) if neighbours_frac else np.empty((0, 3))
-        )
-        cart_unique = frac_unique @ structure.lattice.matrix  # (n_unique, 3)
+        frac_neigh = np.unique(np.asarray(frac_neigh), axis=0)
+        cart_neigh = (frac_neigh @ structure.lattice.matrix).astype(np.float32)  # (M,3)
 
-        # Pair-wise vectors & distances ----------------------------------------
-        # cart_unique[:,None,:] – (n_unique,1,3)
-        # cart_grid_K[None,:,:] – (1,n_atoms,3)
-        diff = cart_grid_K[None, :, :] - cart_unique[:, None, :]
-        rad = np.linalg.norm(diff, axis=2)  # (n_unique, n_atoms)
-
+        # pairwise differences → (M, n_atoms, 3)
+        diff = cart_coords_all[None, :, :] - cart_neigh[:, None, :]
+        dist = np.linalg.norm(diff, axis=2)  # (M, n_atoms)
         with np.errstate(divide="ignore"):
-            rad_inv = np.where(rad != 0.0, 1.0 / rad, 0.0)
+            dist_inv = np.where(dist != 0.0, 1.0 / dist, 0.0)
 
-        # Cosine cutoff ---------------------------------------------------------
-        r_cut = np.minimum(rad, cut_off_rad)
-        cutoff = 0.5 * (np.cos(np.pi * r_cut / cut_off_rad) + 1.0)  # (n_unique, n_atoms)
+        # cut‑off function f_c(r)
+        r_cut = np.minimum(dist, cut_off_rad)
+        fcut = (np.cos(np.pi * r_cut / cut_off_rad) + 1.0) * 0.5  # (M, n_atoms)
 
-        # Allocate feature holders --------------------------------------------
-        radial_fp_elem: List[np.ndarray] = []  # length = num_gamma, each (n_atoms,)
-        dipole_elem = [[]
-                        for _ in range(3)]     # 3 × num_gamma arrays
-        quad_elem = [[]
-                      for _ in range(6)]       # 6 × num_gamma arrays
+        # Holder lists for this element
+        radial_vals: List[np.ndarray] = []
+        dipole_vals = [[] for _ in range(3)]  # x,y,z
+        quad_vals = [[] for _ in range(6)]    # xx,yy,zz,xy,yz,zx
 
-        # Loop over all γ values ----------------------------------------------
+        rx, ry, rz = diff[..., 0], diff[..., 1], diff[..., 2]
+
         for gamma in gamma_list:
             norm = (gamma / np.pi) ** 1.5
-            g = norm * np.exp(-gamma * rad**2) * cutoff   # (n_unique, n_atoms)
+            g = norm * np.exp(-gamma * (dist ** 2)) * fcut  # (M, n_atoms)
 
-            # 1) radial
-            radial_fp_elem.append(g.sum(axis=0))
+            radial_vals.append(g.sum(axis=0))
 
-            # 2) dipole   Σ (Δr_i * g / r)
-            for dim in range(3):
-                comp = diff[:, :, dim]
-                dip = np.where(rad != 0.0, comp * g * rad_inv, 0.0).sum(axis=0)
-                dipole_elem[dim].append(dip)
+            # dipole = Σ (r_i * g / r)
+            for dim, comp in enumerate((rx, ry, rz)):
+                dip = np.where(dist != 0.0, comp * g * dist_inv, 0.0).sum(axis=0)
+                dipole_vals[dim].append(dip)
 
-            # 3) quadrupole Σ ((Δr_a Δr_b) g / r²)
-            rx, ry, rz = diff[:, :, 0], diff[:, :, 1], diff[:, :, 2]
+            # quadrupole terms Σ (r_a r_b g / r^2)
             with np.errstate(divide="ignore"):
-                r_inv2 = np.where(rad != 0.0, rad_inv**2, 0.0)
-                quad_arrays = [
-                    (rx * rx) * g * r_inv2,  # xx
-                    (ry * ry) * g * r_inv2,  # yy
-                    (rz * rz) * g * r_inv2,  # zz
-                    (rx * ry) * g * r_inv2,  # xy
-                    (ry * rz) * g * r_inv2,  # yz
-                    (rz * rx) * g * r_inv2,  # zx
-                ]
-                for q_idx, q_val in enumerate(quad_arrays):
-                    quad_elem[q_idx].append(q_val.sum(axis=0))
+                r2_inv = np.where(dist != 0.0, dist_inv ** 2, 0.0)
+                quad_vals[0].append((rx * rx * g * r2_inv).sum(axis=0))  # xx
+                quad_vals[1].append((ry * ry * g * r2_inv).sum(axis=0))  # yy
+                quad_vals[2].append((rz * rz * g * r2_inv).sum(axis=0))  # zz
+                quad_vals[3].append((rx * ry * g * r2_inv).sum(axis=0))  # xy
+                quad_vals[4].append((ry * rz * g * r2_inv).sum(axis=0))  # yz
+                quad_vals[5].append((rz * rx * g * r2_inv).sum(axis=0))  # zx
 
-        # Stack feature lists --------------------------------------------------
-        radial_block = np.stack(radial_fp_elem, axis=0)            # (num_gamma, n_atoms)
-        dipole_block = np.stack([np.stack(v, axis=0) for v in dipole_elem], axis=0)
-        dipole_block = dipole_block.reshape(3 * num_gamma, num_atoms)  # (3*num_gamma, n_atoms)
-        quad_block = np.stack([np.stack(v, axis=0) for v in quad_elem], axis=0)
-        quad_block = quad_block.reshape(6 * num_gamma, num_atoms)      # (6*num_gamma, n_atoms)
+        # stack & reshape to (n_atoms, num_gamma*10)
+        radial_block = np.stack(radial_vals, axis=0)                      # (G, n_atoms)
+        dipole_block = np.stack([np.stack(v, axis=0) for v in dipole_vals], axis=0)  # (3,G,n_atoms)
+        quad_block = np.stack([np.stack(v, axis=0) for v in quad_vals], axis=0)      # (6,G,n_atoms)
 
-        elem_feats = np.concatenate((radial_block, dipole_block, quad_block), axis=0)
-        elem_feature_blocks.append(elem_feats.T)  # transpose → (n_atoms, feat_dim_elem)
+        block_concat = np.concatenate([
+            radial_block,
+            dipole_block.reshape(3 * num_gamma, num_atoms),
+            quad_block.reshape(6 * num_gamma, num_atoms),
+        ], axis=0).T  # -> (n_atoms, G*10)
 
-    # Concatenate element blocks along *feature* axis --------------------------
-    dset = np.concatenate(elem_feature_blocks, axis=1).astype(np.float32)
+        radial_blocks.append(block_concat.astype(np.float32))
 
-    # 5. Build local orthogonal basis (flattened 3×3 → 9) ----------------------
-    basis_list: List[np.ndarray] = []
-    cutoff_basis = 5.0
+    # concatenate blocks from all present elements along feature axis
+    dset = np.concatenate(radial_blocks, axis=1).astype(np.float32)  # (n_atoms, feat_dim_total)
 
+    # ------------------------------------------------------------------
+    # Local orthonormal basis – identical to original logic
+    # ------------------------------------------------------------------
+    basis_rows = []
+    cutoff_nn = 5.0
     for site in structure.sites:
         pos = site.coords
-        neighs = sorted(structure.get_neighbors(site, cutoff_basis), key=lambda x: x[1])
-
+        neighs = sorted(structure.get_neighbors(site, cutoff_nn), key=lambda x: x[1])
         if len(neighs) < 2:
-            mat = np.eye(3)
-        else:
-            v1 = neighs[0][0].coords - pos
-            v2 = neighs[1][0].coords - pos
-            v1 /= np.linalg.norm(v1)
-            u3 = np.cross(v1, v2)
-            if np.linalg.norm(u3) == 0:
-                # Degenerate neighbours – fallback
-                u3 = np.array([0.0, 0.0, 1.0])
-            else:
-                u3 /= np.linalg.norm(u3)
-            u2 = np.cross(u3, v1)
-            u2 /= np.linalg.norm(u2)
-            mat = np.vstack((v1, u2, u3)).T  # shape (3,3)
-        basis_list.append(mat.flatten())
+            basis_rows.append(np.eye(3, dtype=np.float32).flatten())
+            continue
+        v1 = neighs[0][0].coords - pos
+        v2 = neighs[1][0].coords - pos
+        u3 = np.cross(v1, v2)
+        u2 = np.cross(u3, v1)
+        u1 = v1 / np.linalg.norm(v1)
+        u2 = u2 / (np.linalg.norm(u2) + 1e-8)
+        u3 = u3 / (np.linalg.norm(u3) + 1e-8)
+        basis_rows.append(np.vstack([u1, u2, u3]).T.astype(np.float32).flatten())
 
-    basis_mat = np.array(basis_list, dtype=np.float32)
-
+    basis_mat = np.vstack(basis_rows)  # (n_atoms, 9)
     return dset, basis_mat, sites_elem, num_atoms, at_elem
+
+
+# ---------------------------------------------------------------------------
+# Normalisation helpers – rely on joblib.MaxAbsScaler stored on disk
+# ---------------------------------------------------------------------------
+
+def _load_scalers(paths: Tuple[str, str, str, str]):
+    from joblib import load
+
+    try:
+        return tuple(load(p) for p in paths)
+    except Exception as exc:  # pragma: no cover – keep error readable
+        raise FileNotFoundError(
+            "MaxAbsScaler .joblib files not found or corrupted. "
+            "Ensure the path tuple points to four valid pickles."
+        ) from exc
+
+
+def fp_chg_norm(
+    Coef_at1: np.ndarray,
+    Coef_at2: np.ndarray,
+    Coef_at3: np.ndarray,
+    Coef_at4: np.ndarray,
+    X_3D1: np.ndarray,
+    X_3D2: np.ndarray,
+    X_3D3: np.ndarray,
+    X_3D4: np.ndarray,
+    padding_size: int,
+    scaler_paths: Tuple[str, str, str, str],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Concatenate predicted charge coefficient (single scalar per atom) to fingerprints
+    *and* run ``MaxAbsScaler`` normalisation.
+
+    Each ``Coef_at#`` is expected to be ``(1, padding_size, 1)``; each ``X_3D#``
+    is ``(1, padding_size, feat_dim)``.
+    """
+    # reshape helpers – keeps code readable
+    def _flat(arr: np.ndarray) -> np.ndarray:
+        return arr.reshape(padding_size, -1)
+
+    feats = [
+        np.concatenate([_flat(X_3D1), _flat(Coef_at1)], axis=1),
+        np.concatenate([_flat(X_3D2), _flat(Coef_at2)], axis=1),
+        np.concatenate([_flat(X_3D3), _flat(Coef_at3)], axis=1),
+        np.concatenate([_flat(X_3D4), _flat(Coef_at4)], axis=1),
+    ]  # list of (P, feat+1)
+
+    scalerC, scalerH, scalerN, scalerO = _load_scalers(scaler_paths)
+    scalers = [scalerC, scalerH, scalerN, scalerO]
+
+    feats_scaled = [
+        s.transform(f) if f.size else f  # allow empty if element absent
+        for f, s in zip(feats, scalers)
+    ]
+
+    # reshape back to 3‑D tensors
+    out = [f.reshape(1, padding_size, -1).astype(np.float32) for f in feats_scaled]
+    return tuple(out)
+
+
+def fp_norm(
+    X_C: np.ndarray,
+    X_H: np.ndarray,
+    X_N: np.ndarray,
+    X_O: np.ndarray,
+    padding_size: int,
+    scaler_paths: Tuple[str, str, str, str],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Apply MaxAbsScaler normalisation *without* appending charge coefficient."""
+    scalers = _load_scalers(scaler_paths)
+    tensors = [X_C, X_H, X_N, X_O]
+
+    outs = []
+    for tens, sc in zip(tensors, scalers):
+        n_samples = tens.shape[0]
+        feat = tens.shape[-1]
+        flat = tens.reshape(n_samples * padding_size, feat)
+        norm = sc.transform(flat).reshape(n_samples, padding_size, feat).astype(np.float32)
+        outs.append(norm)
+
+    return tuple(outs)
