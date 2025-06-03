@@ -558,7 +558,10 @@ def retrain_emodel(
 # ------------------------------------------------------------------------------
 # Wrapper to load pretrained energy model (只用于推理)
 # ------------------------------------------------------------------------------
-def load_pretrained_energy_model(checkpoint_path: str, padding_size: int, dim_C: int = 709, dim_H: int = 577, dim_N: int = 709, dim_O: int = 709):
+def load_pretrained_energy_model(checkpoint_path: str, padding_size: int,
+                                dim_C: int, dim_H: int,
+                                dim_N: int, dim_O: int):
+    model = init_Emod(padding_size, dim_C, dim_H, dim_N, dim_O)
     """
     加载一个训练好的能量模型并返回。
     """
