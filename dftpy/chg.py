@@ -87,7 +87,7 @@ class ChargeDataset(Dataset):
     def __init__(self, *arrays):
         self.arrays = [torch.from_numpy(a).float() for a in arrays]
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.arrays[0].shape[0]
 
     def __getitem__(self, i):
@@ -108,7 +108,7 @@ def _prepare(
 ) -> Tuple[np.ndarray, ...]:
     XCs, XHs, XNs, XOs, CCs, CHs, CNs, COs = [], [], [], [], [], [], [], []
 
-    def _pad_coef(a, dim):
+    def _pad_coef(a: np.ndarray, dim: int) -> np.ndarray:
         pad = np.zeros((padding, dim), np.float32)
         if a.size:
             pad[: min(len(a), padding)] = a[:padding]
@@ -127,7 +127,7 @@ def _prepare(
         XNs.append(_fix_feat(X3))
         XOs.append(_fix_feat(X4))
 
-        load = lambda n: np.load(Path(fld)/n) if (Path(fld)/n).is_file() else np.empty((0,1))
+        load = lambda n: np.load(Path(fld) / n) if (Path(fld) / n).is_file() else np.empty((0, 1))
         CCs.append(_pad_coef(load("Coef_C.npy"), 340))
         CHs.append(_pad_coef(load("Coef_H.npy"), 208))
         CNs.append(_pad_coef(load("Coef_N.npy"), 340))
@@ -195,7 +195,24 @@ def _charge(exp, coef):
     return float(np.sum(np.pi**1.5 * coef / exp**1.5))
 
 def infer_charges(folder: str, chg_model: ChargeModel, padding_size: int, args):
-    struct = Poscar.from_file(Path(folder) / "POSCAR").structure
+    """
+    folder: 既可以是“包含 POSCAR 文件的目录”，也可以直接是 POSCAR 文件本身
+    """
+    # ----- 1) 先定位 POSCAR 文件的真实路径 -----
+    p = Path(folder)
+    if p.is_file() and p.name.upper() == "POSCAR":
+        # 如果 folder 本身就是一个“POSCAR 文件路径”
+        poscar_path = p
+    else:
+        # 否则 folder 应当是包含 POSCAR 的目录
+        poscar_path = p / "POSCAR"
+    if not poscar_path.is_file():
+        raise FileNotFoundError(f"无法找到 POSCAR: {poscar_path}")
+
+    # ----- 2) 从 POSCAR 里读结构 -----
+    struct = Poscar.from_file(str(poscar_path)).structure
+
+    # ----- 3) 计算指纹 & pad -----
     dset, basis, *_ = fp_atom(
         struct,
         args.grid_spacing, args.cut_off_rad,
@@ -204,21 +221,21 @@ def infer_charges(folder: str, chg_model: ChargeModel, padding_size: int, args):
     ats = [struct.species.count(e) for e in ("C", "H", "N", "O")]
     X1, X2, X3, X4, *_ = chg_data(dset, basis, *ats, padding_size)
 
-    # 转为 Tensor 并送进模型
+    # ----- 4) 转为 Tensor 并送进模型 -----
     tens = lambda x: torch.from_numpy(_fix_feat(x)).float().to(DEVICE)
     Xc_t, Xh_t, Xn_t, Xo_t = tens(X1), tens(X2), tens(X3), tens(X4)
 
-    # 确保不计算梯度
+    # ----- 5) 推理（no_grad 模式） -----
     chg_model.eval()
     with torch.no_grad():
         C_t, H_t, N_t, O_t = chg_model(Xc_t, Xh_t, Xn_t, Xo_t)
 
-    # detach 再转 numpy
+    # ----- 6) detach 并转回 NumPy -----
     C_arr, H_arr, N_arr, O_arr = (
         t.detach().cpu().numpy().squeeze(0) for t in (C_t, H_t, N_t, O_t)
     )
 
-    # 计算每个原子电荷值
+    # ----- 7) 逐个原子用 _charge 公式计算电荷值 -----
     charges = []
     for n, arr, dim in zip(ats, (C_arr, H_arr, N_arr, O_arr), (340, 208, 340, 340)):
         if n == 0:
@@ -228,11 +245,13 @@ def infer_charges(folder: str, chg_model: ChargeModel, padding_size: int, args):
             charges.append(_charge(arr[i, :e], arr[i, e:]))
     ch = np.array(charges, np.float32)
 
-    # 可选写文件
+    # 如果用户指定了写文件，就把预测值写到 “<folder_name>_Pred_CHG.dat”
     if getattr(args, "write_chg", False):
         try:
-            Chgcar.from_file(Path(folder) / "CHGCAR")
-            np.savetxt(Path(folder).name + "_Pred_CHG.dat", ch, fmt="%.6f")
+            # 仅当原始结构文件夹里有 CHGCAR 时才写
+            Chgcar.from_file(poscar_path.parent / "CHGCAR")
+            fname = poscar_path.parent.name + "_Pred_CHG.dat"
+            np.savetxt(fname, ch, fmt="%.6f")
         except FileNotFoundError:
             pass
 
