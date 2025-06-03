@@ -229,17 +229,45 @@ def fp_atom(
 # Normalisation helpers – rely on joblib.MaxAbsScaler stored on disk
 # ---------------------------------------------------------------------------
 
-def _load_scalers(paths: Tuple[str, str, str, str]):
-    from joblib import load
+# def _load_scalers(paths: Tuple[str, str, str, str]):
+#     from joblib import load
 
+#     try:
+#         return tuple(load(p) for p in paths)
+#     except Exception as exc:  # pragma: no cover – keep error readable
+#         raise FileNotFoundError(
+#             "MaxAbsScaler .joblib files not found or corrupted. "
+#             "Ensure the path tuple points to four valid pickles."
+#         ) from exc
+
+def _load_scalers(paths: tuple[str, str, str, str]):
+    """
+    paths: 一个包含四个 .joblib 文件绝对路径的 tuple，
+           顺序是 (Scale_model_C.joblib, Scale_model_H.joblib, Scale_model_N.joblib, Scale_model_O.joblib)
+
+    本函数会先做一个 “模块别名” 的 hack，让 sklearn.preprocessing.data 指向 sklearn.preprocessing._data，
+    再去真正地 load(pickle_path)。如果任意一个 path 不存在，就抛 FileNotFoundError。
+    """
+
+    # 在新版 sklearn 里，MaxAbsScaler 类放在 sklearn.preprocessing._data 里
+    # 旧 pickle 里把模块写成 sklearn.preprocessing.data，所以这里把旧名字映射到新版模块
     try:
-        return tuple(load(p) for p in paths)
-    except Exception as exc:  # pragma: no cover – keep error readable
-        raise FileNotFoundError(
-            "MaxAbsScaler .joblib files not found or corrupted. "
-            "Ensure the path tuple points to four valid pickles."
-        ) from exc
+        import sklearn.preprocessing._data as _data_module
+        # 之所以要往 sys.modules 里插，是因为 pickle 会去 sys.modules 找这个名字
+        sys.modules['sklearn.preprocessing.data'] = _data_module
+    except ImportError:
+        # 如果 sklearn 版本实在太老，没有 _data 模块，就不处理
+        pass
 
+    scalers = []
+    for p in paths:
+        if not os.path.exists(p):
+            raise FileNotFoundError(
+                f"MaxAbsScaler .joblib 文件未找到: {p}\n"
+                "请检查 dftpy/scalers/ 目录下是否有 Scale_model_C.joblib, Scale_model_H.joblib, Scale_model_N.joblib, Scale_model_O.joblib"
+            )
+        scalers.append(load(p))
+    return tuple(scalers)
 
 def fp_chg_norm(
     Coef_at1: np.ndarray,
