@@ -87,7 +87,9 @@ class ChargeDataset(Dataset):
     def __init__(self, *arrays):
         self.arrays = [torch.from_numpy(a).float() for a in arrays]
 
-    def __len__(self):       return self.arrays[0].shape[0]
+    def __len__(self):
+        return self.arrays[0].shape[0]
+
     def __getitem__(self, i):
         return tuple(a[i] for a in self.arrays)
 
@@ -154,24 +156,28 @@ def train_chg_model(train_folders, val_folders, padding_size, args):
     best, best_ep = 1e9, 0
     for ep in range(1, args.epochs + 1):
         # ----- train -----
-        model.train(); tl = 0.0
+        model.train()
+        tl = 0.0
         for Xc, Xh, Xn, Xo, Cc, Ch, Cn, Co in tr:
-            Xc,Xh,Xn,Xo = (t.to(DEVICE) for t in (Xc,Xh,Xn,Xo))
-            Cc,Ch,Cn,Co = (t.to(DEVICE) for t in (Cc,Ch,Cn,Co))
+            Xc, Xh, Xn, Xo = (t.to(DEVICE) for t in (Xc, Xh, Xn, Xo))
+            Cc, Ch, Cn, Co = (t.to(DEVICE) for t in (Cc, Ch, Cn, Co))
             opt.zero_grad()
-            Pc,Ph,Pn,Po = model(Xc,Xh,Xn,Xo)
-            loss = _MSE(Pc,Cc)+_MSE(Ph,Ch)+_MSE(Pn,Cn)+_MSE(Po,Co)
-            loss.backward(); opt.step(); tl += loss.item()
+            Pc, Ph, Pn, Po = model(Xc, Xh, Xn, Xo)
+            loss = _MSE(Pc, Cc) + _MSE(Ph, Ch) + _MSE(Pn, Cn) + _MSE(Po, Co)
+            loss.backward()
+            opt.step()
+            tl += loss.item()
         tl /= len(tr)
 
         # ----- val -----
-        model.eval(); vl = 0.0
+        model.eval()
+        vl = 0.0
         with torch.no_grad():
             for Xc, Xh, Xn, Xo, Cc, Ch, Cn, Co in va:
-                Xc,Xh,Xn,Xo = (t.to(DEVICE) for t in (Xc,Xh,Xn,Xo))
-                Cc,Ch,Cn,Co = (t.to(DEVICE) for t in (Cc,Ch,Cn,Co))
-                Pc,Ph,Pn,Po = model(Xc,Xh,Xn,Xo)
-                vl += (_MSE(Pc,Cc)+_MSE(Ph,Ch)+_MSE(Pn,Cn)+_MSE(Po,Co)).item()
+                Xc, Xh, Xn, Xo = (t.to(DEVICE) for t in (Xc, Xh, Xn, Xo))
+                Cc, Ch, Cn, Co = (t.to(DEVICE) for t in (Cc, Ch, Cn, Co))
+                Pc, Ph, Pn, Po = model(Xc, Xh, Xn, Xo)
+                vl += (_MSE(Pc, Cc) + _MSE(Ph, Ch) + _MSE(Pn, Cn) + _MSE(Po, Co)).item()
         vl /= len(va)
         print(f"Epoch {ep:03d} | Train {tl:.4e} | Val {vl:.4e}")
 
@@ -179,39 +185,57 @@ def train_chg_model(train_folders, val_folders, padding_size, args):
             best, best_ep = vl, ep
             torch.save(model.state_dict(), "best_chg.pth")
         if ep - best_ep >= args.patience:
-            print("Early-stop."); break
+            print("Early-stop.")
+            break
 
     print(f"[DONE] best Val Loss = {best:.4e} @ epoch {best_ep}")
 
 # ------------------------- 推理 ---------------------------------------------#
-def _charge(exp, coef): return float(np.sum(np.pi**1.5 * coef / exp**1.5))
+def _charge(exp, coef):
+    return float(np.sum(np.pi**1.5 * coef / exp**1.5))
 
 def infer_charges(folder: str, chg_model: ChargeModel, padding_size: int, args):
-    struct = Poscar.from_file(Path(folder)/"POSCAR").structure
+    struct = Poscar.from_file(Path(folder) / "POSCAR").structure
     dset, basis, *_ = fp_atom(
         struct,
         args.grid_spacing, args.cut_off_rad,
         args.widest_gaussian, args.narrowest_gaussian, args.num_gamma,
     )
-    ats = [struct.species.count(e) for e in ("C","H","N","O")]
-    X1,X2,X3,X4,*_ = chg_data(dset, basis, *ats, padding_size)
-    tens = lambda x: torch.from_numpy(_fix_feat(x)).float().to(DEVICE)
-    C,H,N,O = chg_model(tens(X1),tens(X2),tens(X3),tens(X4))
-    C,H,N,O = (t.cpu().numpy().squeeze(0) for t in (C,H,N,O))
+    ats = [struct.species.count(e) for e in ("C", "H", "N", "O")]
+    X1, X2, X3, X4, *_ = chg_data(dset, basis, *ats, padding_size)
 
+    # 转为 Tensor 并送进模型
+    tens = lambda x: torch.from_numpy(_fix_feat(x)).float().to(DEVICE)
+    Xc_t, Xh_t, Xn_t, Xo_t = tens(X1), tens(X2), tens(X3), tens(X4)
+
+    # 确保不计算梯度
+    chg_model.eval()
+    with torch.no_grad():
+        C_t, H_t, N_t, O_t = chg_model(Xc_t, Xh_t, Xn_t, Xo_t)
+
+    # detach 再转 numpy
+    C_arr, H_arr, N_arr, O_arr = (
+        t.detach().cpu().numpy().squeeze(0) for t in (C_t, H_t, N_t, O_t)
+    )
+
+    # 计算每个原子电荷值
     charges = []
-    for n, arr, dim in zip(ats, (C,H,N,O), (340,208,340,340)):
-        if n==0: continue
-        e = 93 if dim==340 else 58
-        for i in range(n): charges.append(_charge(arr[i,:e], arr[i,e:]))
+    for n, arr, dim in zip(ats, (C_arr, H_arr, N_arr, O_arr), (340, 208, 340, 340)):
+        if n == 0:
+            continue
+        e = 93 if dim == 340 else 58
+        for i in range(n):
+            charges.append(_charge(arr[i, :e], arr[i, e:]))
     ch = np.array(charges, np.float32)
 
     # 可选写文件
-    if getattr(args,"write_chg",False):
+    if getattr(args, "write_chg", False):
         try:
-            Chgcar.from_file(Path(folder)/"CHGCAR")
-            np.savetxt(Path(folder).name+"_Pred_CHG.dat", ch, fmt="%.6f")
-        except FileNotFoundError: pass
+            Chgcar.from_file(Path(folder) / "CHGCAR")
+            np.savetxt(Path(folder).name + "_Pred_CHG.dat", ch, fmt="%.6f")
+        except FileNotFoundError:
+            pass
+
     return ch
 
 # ------------------------- 导出 ---------------------------------------------#
