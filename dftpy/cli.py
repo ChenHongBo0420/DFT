@@ -19,33 +19,36 @@ def parse_args():
     # ========= “train” 子命令 ==========
     train_parser = subparsers.add_parser("train", help="Train models: chg/energy/dos/all")
     train_parser.add_argument("--task", required=True, choices=["chg", "energy", "dos", "all"])
-    train_parser.add_argument("--train-list", type=str, required=True, help="Train CSV, 列名为 files")
-    train_parser.add_argument("--val-list", type=str, required=True, help="Val   CSV, 列名为 files")
+    train_parser.add_argument("--train-list", dest="train_list", type=str, required=True,
+                              help="Train CSV, 列名为 files")
+    train_parser.add_argument("--val-list", dest="val_list", type=str, required=True,
+                              help="Val   CSV, 列名为 files")
     train_parser.add_argument("--epochs", type=int, default=100)
-    train_parser.add_argument("--batch-size", type=int, default=64)
-    train_parser.add_argument("--learning-rate", type=float, default=1e-4)
+    train_parser.add_argument("--batch-size", dest="batch_size", type=int, default=64)
+    train_parser.add_argument("--learning-rate", dest="learning_rate", type=float, default=1e-4)
     train_parser.add_argument("--patience", type=int, default=20)
-    train_parser.add_argument("--grid-spacing", type=float, default=1.0)
-    train_parser.add_argument("--cut-off-rad", type=float, default=6.0)
-    train_parser.add_argument("--widest-gaussian", type=float, default=2.0)
-    train_parser.add_argument("--narrowest-gaussian", type=float, default=0.5)
-    train_parser.add_argument("--num-gamma", type=int, default=10)
-    train_parser.add_argument("--padding-multiplier", type=float, default=1.0)
+    train_parser.add_argument("--grid-spacing", dest="grid_spacing", type=float, default=1.0)
+    train_parser.add_argument("--cut-off-rad", dest="cut_off_rad", type=float, default=6.0)
+    train_parser.add_argument("--widest-gaussian", dest="widest_gaussian", type=float, default=2.0)
+    train_parser.add_argument("--narrowest-gaussian", dest="narrowest_gaussian", type=float, default=0.5)
+    train_parser.add_argument("--num-gamma", dest="num_gamma", type=int, default=10)
+    train_parser.add_argument("--padding-multiplier", dest="padding_multiplier", type=float, default=1.0)
 
     # ========= “infer” 子命令 ==========
     infer_parser = subparsers.add_parser("infer", help="Infer on new structures")
-    infer_parser.add_argument("--infer-list", type=str, required=True, help="Predict CSV, 列名为 file_loc_test")
-    infer_parser.add_argument("--output-dir", type=str, default="results")
-    infer_parser.add_argument("--predict-chg", action="store_true")
-    infer_parser.add_argument("--predict-energy", action="store_true")
-    infer_parser.add_argument("--predict-dos", action="store_true")
-    infer_parser.add_argument("--grid-spacing", type=float, default=1.0)
-    infer_parser.add_argument("--cut-off-rad", type=float, default=6.0)
-    infer_parser.add_argument("--widest-gaussian", type=float, default=2.0)
-    infer_parser.add_argument("--narrowest-gaussian", type=float, default=0.5)
-    infer_parser.add_argument("--num-gamma", type=int, default=10)
-    infer_parser.add_argument("--padding-multiplier", type=float, default=1.0)
-    infer_parser.add_argument("--plot-dos", action="store_true")
+    infer_parser.add_argument("--infer-list", dest="infer_list", type=str, required=True,
+                              help="Predict CSV, 列名为 file_loc_test")
+    infer_parser.add_argument("--output-dir", dest="output_dir", type=str, default="results")
+    infer_parser.add_argument("--predict-chg", dest="predict_chg", action="store_true")
+    infer_parser.add_argument("--predict-energy", dest="predict_energy", action="store_true")
+    infer_parser.add_argument("--predict-dos", dest="predict_dos", action="store_true")
+    infer_parser.add_argument("--grid-spacing", dest="grid_spacing", type=float, default=1.0)
+    infer_parser.add_argument("--cut-off-rad", dest="cut_off_rad", type=float, default=6.0)
+    infer_parser.add_argument("--widest-gaussian", dest="widest_gaussian", type=float, default=2.0)
+    infer_parser.add_argument("--narrowest-gaussian", dest="narrowest_gaussian", type=float, default=0.5)
+    infer_parser.add_argument("--num-gamma", dest="num_gamma", type=int, default=10)
+    infer_parser.add_argument("--padding-multiplier", dest="padding_multiplier", type=float, default=1.0)
+    infer_parser.add_argument("--plot-dos", dest="plot_dos", action="store_true")
 
     return parser.parse_args()
 
@@ -56,7 +59,7 @@ def main():
 
     if args.mode == "train":
         # ─── 1) 读取 CSV，得到文件夹列表 ───
-        train_folders = read_file_list(args.train-list, col="files")
+        train_folders = read_file_list(args.train_list, col="files")
         val_folders = read_file_list(args.val_list, col="files")
 
         # ─── 2) 计算 padding_size: max_atom_count * padding_multiplier ───
@@ -84,7 +87,7 @@ def main():
 
         if args.task in ("dos", "all"):
             print("[INFO] 训练 DOS 模型 …")
-            # （可选）先加载电荷模型，但train_dos_model并不需要它
+            # （可选）先加载电荷模型，但 train_dos_model 并不需要它
             chg_ckpt = "best_chg.pth"
             try:
                 _ = load_pretrained_chg_model(chg_ckpt, padding_size)
