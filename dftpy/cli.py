@@ -161,7 +161,7 @@ def main():
                 return
 
         if args.predict_energy:
-            energy_ckpt = "best_energy.pth"
+            energy_ckpt = "newEmodel.pth"
             try:
                 energy_model = load_pretrained_energy_model(
                     energy_ckpt, padding_size
