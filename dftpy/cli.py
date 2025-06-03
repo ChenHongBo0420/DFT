@@ -18,7 +18,7 @@ def parse_args():
 
     # ========= “train” 子命令 ==========
     train_parser = subparsers.add_parser("train", help="Train models: chg/energy/dos/all")
-    train_parser.add_argument("--task", required=True, choices=["chg","energy","dos","all"])
+    train_parser.add_argument("--task", required=True, choices=["chg", "energy", "dos", "all"])
     train_parser.add_argument("--train-list", type=str, required=True, help="Train CSV, 列名为 files")
     train_parser.add_argument("--val-list", type=str, required=True, help="Val   CSV, 列名为 files")
     train_parser.add_argument("--epochs", type=int, default=100)
@@ -66,7 +66,7 @@ def main():
         if padding_size < 1:
             raise ValueError("Computed padding_size < 1; 请检查输入文件或 padding_multiplier。")
 
-        # ─── 3) 按 task 依次训练 ───
+        # ─── 3) 依次训练 ───
         if args.task in ("chg", "all"):
             print("[INFO] 训练电荷模型 …")
             train_chg_model(train_folders, val_folders, padding_size, args)
@@ -84,15 +84,15 @@ def main():
 
         if args.task in ("dos", "all"):
             print("[INFO] 训练 DOS 模型 …")
-            # 先加载电荷模型
+            # 必须先加载电荷模型
             chg_ckpt = "best_chg.pth"
             try:
                 chg_model = load_pretrained_chg_model(chg_ckpt, padding_size)
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
-            # DOS 阶段需要传入 padding_size 和 args
-            train_dos_model(train_folders, val_folders, chg_model, padding_size, args)
+            # 注意：train_dos_model 的签名是 (train_folders, val_folders, chg_model, args)
+            train_dos_model(train_folders, val_folders, chg_model, args)
 
     elif args.mode == "infer":
         # ─── 1) 读取 CSV，得到要预测的文件夹列表 ───
@@ -124,12 +124,11 @@ def main():
 
         # ─── 3) 加载能量模型（如需要） ───
         if args.predict_energy:
-            # 推理时我们保存的能量模型文件名：newEmodel.pth
+            # 能量模型文件名：newEmodel.pth
             energy_ckpt = "newEmodel.pth"
-            # 需要与训练时的 dim_C/H/N/O 保持一致：
-            # 训练时 fingerprint_dim=360, basis_dim=9 => dim_=360+9 = 369
+            # 与训练时一 致：fingerprint_dim=360, basis_dim=9 → dim=369
             fingerprint_dim = 360
-            basis_dim       = 9
+            basis_dim = 9
             dim_C = fingerprint_dim + basis_dim
             dim_H = fingerprint_dim + basis_dim
             dim_N = fingerprint_dim + basis_dim
