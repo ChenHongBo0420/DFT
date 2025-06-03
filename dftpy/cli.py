@@ -3,7 +3,7 @@
 import argparse
 import os
 import torch
-import numpy as np    # 新增，用来保存 .npy
+import numpy as np
 from pathlib import Path
 
 from .utils import silence_deprecation_warnings, read_poscar
@@ -17,54 +17,69 @@ from .dos import train_dos_model, load_pretrained_dos_model, infer_dos
 # -----------------------------------------------------------------------------
 def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_size: int, args):
     """
-    对单个结构文件夹 folder：调用 infer_charges 得到所有原子电荷系数，
-    并根据元素顺序拆分成 Coef_C.npy / Coef_H.npy / Coef_N.npy / Coef_O.npy。
-    最终把这四个 .npy 文件写回 folder 目录下，供后续 dos.py 使用。
+    对单个“folder”：
+    - folder 可能是一个“目录”（目录里有 POSCAR），
+      也可能直接是一个 POSCAR 文件路径。
+    本函数会先定位到真正的 POSCAR 文件，然后调用 infer_charges 算出所有原子电荷系数，
+    接着根据结构里 C/H/N/O 的原子数目，把所有系数矩阵按元素依次切分，
+    并分别保存为 folder/Coef_C.npy、folder/Coef_H.npy、folder/Coef_N.npy、folder/Coef_O.npy。
     """
-    # 1) 调用 infer_charges，得到一个 “所有原子系数矩阵”。
-    #    返回值假设形状是 (num_total_atoms, feat_dim)；后面我们再按 “元素数量” 拆开。
-    all_coef = infer_charges(folder, chg_model, padding_size, args)
-    # all_coef: numpy.ndarray 或者 torch.Tensor，形状 (N_total, feat_dim)。我们统一转 np.ndarray
+    p = Path(folder)
+    # 1) 定位到 POSCAR 文件
+    if p.is_file() and p.name.upper() == "POSCAR":
+        poscar_path = p
+        base_dir = p.parent
+    else:
+        poscar_path = p / "POSCAR"
+        base_dir = p
+    if not poscar_path.is_file():
+        raise FileNotFoundError(f"找不到 POSCAR 文件：{poscar_path}")
+
+    # 2) 用 infer_charges 得到 “所有原子电荷系数” — NumPy 数组 or Tensor
+    #    注意：infer_charges 返回的是“二维 NumPy 数组”：shape=(N_total_atoms, )
+    #    但我们在之前改过的 infer_charges 中，会返回一个一维 array “全原子序列”的电荷值列表。
+    #    为了训练 DOS，我们需要“每个原子的 exp/coef 特征矩阵”，不是直接的电荷值。
+    #    这里假设 infer_charges 已修改为直接返回“每个原子 exp/coef 矩阵”（shape = (N_total_atoms, feat_dim)）。
+    #
+    #    如果你当前的 infer_charges 还是返回一维电荷列表，那么你需要另行调整逻辑：
+    #    ——本示例假设 infer_charges 已经按 “Chg->C,H,N,O 四支通路的 exp/coef” 直接输出矩阵，
+    #      如果不是，需要把推理接口改为输出那 4 个元素的系数矩阵（见前面解答）。
+    #
+    #    下面示例以 infer_charges 返回 (N_total_atoms, feat_dim) 为前提。
+    all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
+    # 如果 infer_charges 返回的是 Tensor，需要先 detach, cpu, numpy
     if isinstance(all_coef, torch.Tensor):
-        all_coef = all_coef.cpu().numpy()
+        all_coef = all_coef.detach().cpu().numpy()
 
-    # 2) 从 POSCAR 中提取“每个元素原子个数（at_elem）”，以便把 all_coef 拆分成四份
-    from .fp import fp_atom
-    from .chg import chg_data
+    # 3) 读取 POSCAR 得到结构，统计 C/H/N/O 原子数目
+    struct = read_poscar(str(poscar_path))
+    elem_counts = [struct.species.count(e) for e in ("C", "H", "N", "O")]
+    at_C, at_H, at_N, at_O = elem_counts
+    total_atoms = at_C + at_H + at_N + at_O
 
-    # 2.1 先读 POSCAR：
-    #     这里只需要元素顺序和个数（C,H,N,O 顺序），让后面分配每块系数
-    struct = read_poscar(os.path.join(folder, "POSCAR"))
-    # read_poscar 应该返回一个 pymatgen Structure 对象
-    # 也可以直接用 pymatgen.get_structure_from_file(folder+'/POSCAR')，效果类似
-    # 以下手动统计 C/H/N/O 数量
-    elem_dict = {"C": 0, "H": 0, "N": 0, "O": 0}
-    for site in struct:
-        s = site.specie.symbol
-        if s in elem_dict:
-            elem_dict[s] += 1
-    at_C, at_H, at_N, at_O = elem_dict["C"], elem_dict["H"], elem_dict["N"], elem_dict["O"]
+    # 4) 检查 all_coef 行数是否等于 total_atoms
+    if all_coef.shape[0] != total_atoms:
+        raise ValueError(
+            f"在文件夹 {base_dir} 中，infer_charges 返回的系数行数 {all_coef.shape[0]} "
+            f"与结构实际原子数 {total_atoms} 不一致。"
+        )
 
-    # 3) 现在把 all_coef 按 [C个数, H个数, N个数, O个数] 依次切片
-    #    假设 all_coef 顺序正好对应 “先所有 C，再所有 H，再所有 N，再所有 O”。
-    #    如果 infer_charges 的返回顺序与元素排列一致，这样拆就没问题。
-    #    如果顺序不一样，需要你根据 chg_data 的输出或实际情况来调整下面的切片逻辑。
+    # 5) 把 all_coef 按 [C, H, N, O] 拆分
     i1 = at_C
     i2 = at_C + at_H
     i3 = at_C + at_H + at_N
-    i4 = at_C + at_H + at_N + at_O   # 总原子数
+    i4 = total_atoms
 
-    # 让 all_coef shape = (i4, feat_dim)，并把索引 [0:i1], [i1:i2], [i2:i3], [i3:i4] 分别写入各元素
-    Coef_C = all_coef[0:i1, :].astype(np.float32) if i1 > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
+    Coef_C = all_coef[0:i1, :].astype(np.float32) if at_C > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
     Coef_H = all_coef[i1:i2, :].astype(np.float32) if at_H > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
     Coef_N = all_coef[i2:i3, :].astype(np.float32) if at_N > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
     Coef_O = all_coef[i3:i4, :].astype(np.float32) if at_O > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
 
-    # 4) 保存到 folder 目录下
-    np.save(os.path.join(folder, "Coef_C.npy"), Coef_C)
-    np.save(os.path.join(folder, "Coef_H.npy"), Coef_H)
-    np.save(os.path.join(folder, "Coef_N.npy"), Coef_N)
-    np.save(os.path.join(folder, "Coef_O.npy"), Coef_O)
+    # 6) 将这四个矩阵分别保存到各自文件夹
+    np.save(str(base_dir / "Coef_C.npy"), Coef_C)
+    np.save(str(base_dir / "Coef_H.npy"), Coef_H)
+    np.save(str(base_dir / "Coef_N.npy"), Coef_N)
+    np.save(str(base_dir / "Coef_O.npy"), Coef_O)
 
 
 def parse_args():
@@ -142,7 +157,7 @@ def main():
 
         if args.task in ("dos", "all"):
             print("[INFO] 训练 DOS 模型 …")
-            # 1) 先加载电荷模型（必须有 best_chg.pth）
+            # 1) 先加载电荷模型
             chg_ckpt = "best_chg.pth"
             try:
                 chg_model = load_pretrained_chg_model(chg_ckpt, padding_size)
@@ -150,12 +165,12 @@ def main():
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
 
-            # 2) → 【新增】对 train_folders 和 val_folders 分别生成 Coef_*.npy，保存到各自文件夹
+            # 2) → 【新增】为 train_folders 和 val_folders 分别生成 Coef_*.npy，写回各自文件夹
             print("[INFO] 生成并保存 Coef_*.npy 数据，以备 DOS 训练使用 …")
             for folder in train_folders + val_folders:
                 _save_coef_npy_for_folder(folder, chg_model, padding_size, args)
 
-            # 3) 最后再调用 train_dos_model，dos.py 会去各个 folder 里找 Coef_C.npy 等
+            # 3) 最后再调用 train_dos_model（dos.py 会去各个 folder 里找 Coef_*.npy）
             train_dos_model(train_folders, val_folders, padding_size, args)
 
     elif args.mode == "infer":
