@@ -91,7 +91,7 @@ def main():
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
-            # 注意：train_dos_model 的签名是 (train_folders, val_folders, chg_model, args)
+            # 注意：train_dos_model 的签名是四个参数 (train_folders, val_folders, chg_model, args)
             train_dos_model(train_folders, val_folders, chg_model, args)
 
     elif args.mode == "infer":
@@ -126,7 +126,7 @@ def main():
         if args.predict_energy:
             # 能量模型文件名：newEmodel.pth
             energy_ckpt = "newEmodel.pth"
-            # 与训练时一 致：fingerprint_dim=360, basis_dim=9 → dim=369
+            # 与训练时一致：fingerprint_dim=360, basis_dim=9 → dim=369
             fingerprint_dim = 360
             basis_dim = 9
             dim_C = fingerprint_dim + basis_dim
