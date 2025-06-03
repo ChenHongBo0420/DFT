@@ -3,6 +3,7 @@
 import argparse
 import os
 import torch
+import numpy as np    # 新增，用来保存 .npy
 from pathlib import Path
 
 from .utils import silence_deprecation_warnings, read_poscar
@@ -10,6 +11,60 @@ from .data_io import read_file_list, get_max_atom_count, save_charges, save_ener
 from .chg import train_chg_model, load_pretrained_chg_model, infer_charges
 from .energy import train_energy_model, load_pretrained_energy_model, infer_energy
 from .dos import train_dos_model, load_pretrained_dos_model, infer_dos
+
+# -----------------------------------------------------------------------------
+# 新增：用于将推理出的电荷系数拆分并保存为 Coef_C.npy、Coef_H.npy、Coef_N.npy、Coef_O.npy
+# -----------------------------------------------------------------------------
+def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_size: int, args):
+    """
+    对单个结构文件夹 folder：调用 infer_charges 得到所有原子电荷系数，
+    并根据元素顺序拆分成 Coef_C.npy / Coef_H.npy / Coef_N.npy / Coef_O.npy。
+    最终把这四个 .npy 文件写回 folder 目录下，供后续 dos.py 使用。
+    """
+    # 1) 调用 infer_charges，得到一个 “所有原子系数矩阵”。
+    #    返回值假设形状是 (num_total_atoms, feat_dim)；后面我们再按 “元素数量” 拆开。
+    all_coef = infer_charges(folder, chg_model, padding_size, args)
+    # all_coef: numpy.ndarray 或者 torch.Tensor，形状 (N_total, feat_dim)。我们统一转 np.ndarray
+    if isinstance(all_coef, torch.Tensor):
+        all_coef = all_coef.cpu().numpy()
+
+    # 2) 从 POSCAR 中提取“每个元素原子个数（at_elem）”，以便把 all_coef 拆分成四份
+    from .fp import fp_atom
+    from .chg import chg_data
+
+    # 2.1 先读 POSCAR：
+    #     这里只需要元素顺序和个数（C,H,N,O 顺序），让后面分配每块系数
+    struct = read_poscar(os.path.join(folder, "POSCAR"))
+    # read_poscar 应该返回一个 pymatgen Structure 对象
+    # 也可以直接用 pymatgen.get_structure_from_file(folder+'/POSCAR')，效果类似
+    # 以下手动统计 C/H/N/O 数量
+    elem_dict = {"C": 0, "H": 0, "N": 0, "O": 0}
+    for site in struct:
+        s = site.specie.symbol
+        if s in elem_dict:
+            elem_dict[s] += 1
+    at_C, at_H, at_N, at_O = elem_dict["C"], elem_dict["H"], elem_dict["N"], elem_dict["O"]
+
+    # 3) 现在把 all_coef 按 [C个数, H个数, N个数, O个数] 依次切片
+    #    假设 all_coef 顺序正好对应 “先所有 C，再所有 H，再所有 N，再所有 O”。
+    #    如果 infer_charges 的返回顺序与元素排列一致，这样拆就没问题。
+    #    如果顺序不一样，需要你根据 chg_data 的输出或实际情况来调整下面的切片逻辑。
+    i1 = at_C
+    i2 = at_C + at_H
+    i3 = at_C + at_H + at_N
+    i4 = at_C + at_H + at_N + at_O   # 总原子数
+
+    # 让 all_coef shape = (i4, feat_dim)，并把索引 [0:i1], [i1:i2], [i2:i3], [i3:i4] 分别写入各元素
+    Coef_C = all_coef[0:i1, :].astype(np.float32) if i1 > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
+    Coef_H = all_coef[i1:i2, :].astype(np.float32) if at_H > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
+    Coef_N = all_coef[i2:i3, :].astype(np.float32) if at_N > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
+    Coef_O = all_coef[i3:i4, :].astype(np.float32) if at_O > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
+
+    # 4) 保存到 folder 目录下
+    np.save(os.path.join(folder, "Coef_C.npy"), Coef_C)
+    np.save(os.path.join(folder, "Coef_H.npy"), Coef_H)
+    np.save(os.path.join(folder, "Coef_N.npy"), Coef_N)
+    np.save(os.path.join(folder, "Coef_O.npy"), Coef_O)
 
 
 def parse_args():
@@ -87,14 +142,20 @@ def main():
 
         if args.task in ("dos", "all"):
             print("[INFO] 训练 DOS 模型 …")
-            # （可选）先加载电荷模型，但 train_dos_model 并不需要它
+            # 1) 先加载电荷模型（必须有 best_chg.pth）
             chg_ckpt = "best_chg.pth"
             try:
-                _ = load_pretrained_chg_model(chg_ckpt, padding_size)
+                chg_model = load_pretrained_chg_model(chg_ckpt, padding_size)
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
-            # 直接传四个参数：train_folders, val_folders, padding_size, args
+
+            # 2) → 【新增】对 train_folders 和 val_folders 分别生成 Coef_*.npy，保存到各自文件夹
+            print("[INFO] 生成并保存 Coef_*.npy 数据，以备 DOS 训练使用 …")
+            for folder in train_folders + val_folders:
+                _save_coef_npy_for_folder(folder, chg_model, padding_size, args)
+
+            # 3) 最后再调用 train_dos_model，dos.py 会去各个 folder 里找 Coef_C.npy 等
             train_dos_model(train_folders, val_folders, padding_size, args)
 
     elif args.mode == "infer":
