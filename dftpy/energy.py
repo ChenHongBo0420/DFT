@@ -680,6 +680,7 @@ def train_energy_model(train_folders, val_folders, chg_model, padding_size, args
     内部仍调用你先前写好的 retrain_emodel。
     """
     import numpy as np
+    import os
     from .data_io import get_efp_data, pad_efp_data, fp_norm, get_dos_e_train_data
 
     # 0) 读入数据，做一次 padding & 特征准备
@@ -692,26 +693,24 @@ def train_energy_model(train_folders, val_folders, chg_model, padding_size, args
     padding_size = int(padding_size)   # 保持一致
 
     # 把指纹 / 基函数 / 力 全部 pad 到统一的 padding_size
-    forces1, forces2, forces3, forces4,\
-    X_1, X_2, X_3, X_4,\
-    basis1, basis2, basis3, basis4,\
-    C_m, H_m, N_m, O_m = pad_efp_data(X_elem,     X_pre,     forces_pre,     basis_pre,     padding_size)
-    forcesV1, forcesV2, forcesV3, forcesV4,\
-    X_1V, X_2V, X_3V, X_4V,\
-    basis1V, basis2V, basis3V, basis4V,\
+    forces1, forces2, forces3, forces4, \
+    X_1, X_2, X_3, X_4, \
+    basis1, basis2, basis3, basis4, \
+    C_m, H_m, N_m, O_m = pad_efp_data(X_elem, X_pre, forces_pre, basis_pre, padding_size)
+    forcesV1, forcesV2, forcesV3, forcesV4, \
+    X_1V, X_2V, X_3V, X_4V, \
+    basis1V, basis2V, basis3V, basis4V, \
     C_mV, H_mV, N_mV, O_mV = pad_efp_data(X_elem_val, X_val_pre, forces_val, basis_val_pre, padding_size)
 
     # 调电荷模型对所有样本做一次“电荷加权 + 归一化”
-+    # -------------------------------------------------------------- ★
-+    scaler_paths = (
-+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_C.joblib"),
-+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_H.joblib"),
-+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_N.joblib"),
-+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_O.joblib"),
-+    )
-+    # -------------------------------------------------------------- ★
-+    X_C,  X_H,  X_N,  X_O  = fp_norm(X_1,  X_2,  X_3,  X_4,  padding_size, scaler_paths)
-+    X_CV, X_HV, X_NV, X_OV = fp_norm(X_1V, X_2V, X_3V, X_4V, padding_size, scaler_paths)
+    scaler_paths = (
+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_C.joblib"),
+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_H.joblib"),
+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_N.joblib"),
+        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_O.joblib"),
+    )
+    X_C, X_H, X_N, X_O   = fp_norm(X_1,  X_2,  X_3,  X_4,  padding_size, scaler_paths)
+    X_CV, X_HV, X_NV, X_OV = fp_norm(X_1V, X_2V, X_3V, X_4V, padding_size, scaler_paths)
 
     # 1) 直接把数据喂给你原先的 retrain_emodel
     # ------------------------------------------------------------------
@@ -729,4 +728,3 @@ def train_energy_model(train_folders, val_folders, chg_model, padding_size, args
         patience    = args.patience,
         padding_size= padding_size
     )
-
