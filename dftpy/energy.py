@@ -565,7 +565,6 @@ def load_pretrained_energy_model(checkpoint_path: str, padding_size: int,
     """
     加载一个训练好的能量模型并返回。
     """
-    model = init_Emod(padding_size, dim_C, dim_H, dim_N, dim_O)
     if os.path.exists(checkpoint_path):
         model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
         model.eval()
