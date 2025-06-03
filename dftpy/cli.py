@@ -91,8 +91,8 @@ def main():
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
-            # 注意：train_dos_model 只接受 4 个参数，去掉 padding_size
-            train_dos_model(train_folders, val_folders, chg_model, args)
+            # 【这里是关键改动】补回 padding_size 参数
+            train_dos_model(train_folders, val_folders, chg_model, padding_size, args)
 
     elif args.mode == "infer":
         # ─── 1) 读取 CSV，得到要预测的文件夹列表 ───
@@ -199,12 +199,7 @@ def main():
                         os.path.join(args.output_dir, f"dos_{pdbasename}.txt")
                     )
                     if args.plot_dos:
-                        # 如果你在 utils.py 中实现了 plot_dos，可以在此调用，例如：
-                        # from .utils import plot_dos
-                        # plot_dos(
-                        #     energy_grid, dos_curve, vb, cb,
-                        #     os.path.join(args.output_dir, f"dos_plot_{pdbasename}.png")
-                        # )
+                        # 如果你在 utils.py 中实现了 plot_dos，可以在此调用
                         pass
                 except Exception as e:
                     print(f"[WARN] DOS 预测失败 ({folder}): {e}")
