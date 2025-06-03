@@ -18,7 +18,7 @@ def parse_args():
 
     # ========= “train” 子命令 ==========
     train_parser = subparsers.add_parser("train", help="Train models: chg/energy/dos/all")
-    train_parser.add_argument("--task", required=True, choices=["chg", "energy", "dos", "all"])
+    train_parser.add_argument("--task", required=True, choices=["chg","energy","dos","all"])
     train_parser.add_argument("--train-list", type=str, required=True, help="Train CSV, 列名为 files")
     train_parser.add_argument("--val-list", type=str, required=True, help="Val   CSV, 列名为 files")
     train_parser.add_argument("--epochs", type=int, default=100)
@@ -91,8 +91,8 @@ def main():
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
-            # 【改动点：train_dos_model 只保留 4 个参数，不再传 padding_size】
-            train_dos_model(train_folders, val_folders, chg_model, args)
+            # DOS 阶段需要传入 padding_size 和 args
+            train_dos_model(train_folders, val_folders, chg_model, padding_size, args)
 
     elif args.mode == "infer":
         # ─── 1) 读取 CSV，得到要预测的文件夹列表 ───
@@ -129,7 +129,7 @@ def main():
             # 需要与训练时的 dim_C/H/N/O 保持一致：
             # 训练时 fingerprint_dim=360, basis_dim=9 => dim_=360+9 = 369
             fingerprint_dim = 360
-            basis_dim = 9
+            basis_dim       = 9
             dim_C = fingerprint_dim + basis_dim
             dim_H = fingerprint_dim + basis_dim
             dim_N = fingerprint_dim + basis_dim
