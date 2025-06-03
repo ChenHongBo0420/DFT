@@ -245,21 +245,20 @@ def fp_atom(
 
 def _load_scalers(paths: tuple[str, str, str, str]):
     """
-    paths: 一个包含四个 .joblib 文件绝对路径的 tuple，
-           顺序是 (Scale_model_C.joblib, Scale_model_H.joblib, Scale_model_N.joblib, Scale_model_O.joblib)
+    paths: 四个 .joblib 文件的绝对路径。顺序是 (Scale_model_C, Scale_model_H, Scale_model_N, Scale_model_O)。
 
-    本函数会先做一个 “模块别名” 的 hack，让 sklearn.preprocessing.data 指向 sklearn.preprocessing._data，
-    再去真正地 load(pickle_path)。如果任意一个 path 不存在，就抛 FileNotFoundError。
+    本函数先把 “sklearn.preprocessing.data” 这个旧模块名，指向新版的
+    “sklearn.preprocessing._data”。然后再逐个调用 joblib.load(...)。
+    如果任意一个文件不存在，就抛 FileNotFoundError。
     """
 
-    # 在新版 sklearn 里，MaxAbsScaler 类放在 sklearn.preprocessing._data 里
-    # 旧 pickle 里把模块写成 sklearn.preprocessing.data，所以这里把旧名字映射到新版模块
+    # 如果 sklearn 版本 >=1.5，MaxAbsScaler 放到 sklearn.preprocessing._data 里
     try:
         import sklearn.preprocessing._data as _data_module
-        # 之所以要往 sys.modules 里插，是因为 pickle 会去 sys.modules 找这个名字
+        # 把旧路径 “sklearn.preprocessing.data” 临时指到新版模块
         sys.modules['sklearn.preprocessing.data'] = _data_module
     except ImportError:
-        # 如果 sklearn 版本实在太老，没有 _data 模块，就不处理
+        # 如果环境里不是新版 sklearn，就忽略这一步
         pass
 
     scalers = []
@@ -267,71 +266,52 @@ def _load_scalers(paths: tuple[str, str, str, str]):
         if not os.path.exists(p):
             raise FileNotFoundError(
                 f"MaxAbsScaler .joblib 文件未找到: {p}\n"
-                "请检查 dftpy/scalers/ 目录下是否有 Scale_model_C.joblib, Scale_model_H.joblib, Scale_model_N.joblib, Scale_model_O.joblib"
+                "请检查 dftpy/scalers/ 目录下是否有 Scale_model_C.joblib, Scale_model_H.joblib, "
+                "Scale_model_N.joblib, Scale_model_O.joblib 并且文件名拼写完全一致。"
             )
         scalers.append(load(p))
     return tuple(scalers)
 
 def fp_chg_norm(
-    Coef_at1: np.ndarray,
-    Coef_at2: np.ndarray,
-    Coef_at3: np.ndarray,
-    Coef_at4: np.ndarray,
-    X_3D1: np.ndarray,
-    X_3D2: np.ndarray,
-    X_3D3: np.ndarray,
-    X_3D4: np.ndarray,
+    Coef1: np.ndarray, Coef2: np.ndarray, Coef3: np.ndarray, Coef4: np.ndarray,
+    X_C: np.ndarray, X_H: np.ndarray, X_N: np.ndarray, X_O: np.ndarray,
     padding_size: int,
-    scaler_paths: Tuple[str, str, str, str],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Concatenate predicted charge coefficient (single scalar per atom) to fingerprints
-    *and* run ``MaxAbsScaler`` normalisation.
+    scaler_paths: tuple[str, str, str, str]
+):
+    scaler_C, scaler_H, scaler_N, scaler_O = _load_scalers(scaler_paths)
 
-    Each ``Coef_at#`` is expected to be ``(1, padding_size, 1)``; each ``X_3D#``
-    is ``(1, padding_size, feat_dim)``.
-    """
-    # reshape helpers – keeps code readable
-    def _flat(arr: np.ndarray) -> np.ndarray:
-        return arr.reshape(padding_size, -1)
+    def _norm_concat(X_in, coef_in, scaler):
+        # X_in: (1, padding_size, feat_dim)
+        # coef_in: (padding_size, coef_dim)
+        arr = X_in.reshape(padding_size, -1)     # (P, feat_dim)
+        arr_n = scaler.transform(arr)            # (P, feat_dim)
+        return np.concatenate([arr_n, coef_in], axis=1)  # (P, feat_dim + coef_dim)
 
-    feats = [
-        np.concatenate([_flat(X_3D1), _flat(Coef_at1)], axis=1),
-        np.concatenate([_flat(X_3D2), _flat(Coef_at2)], axis=1),
-        np.concatenate([_flat(X_3D3), _flat(Coef_at3)], axis=1),
-        np.concatenate([_flat(X_3D4), _flat(Coef_at4)], axis=1),
-    ]  # list of (P, feat+1)
-
-    scalerC, scalerH, scalerN, scalerO = _load_scalers(scaler_paths)
-    scalers = [scalerC, scalerH, scalerN, scalerO]
-
-    feats_scaled = [
-        s.transform(f) if f.size else f  # allow empty if element absent
-        for f, s in zip(feats, scalers)
-    ]
-
-    # reshape back to 3‑D tensors
-    out = [f.reshape(1, padding_size, -1).astype(np.float32) for f in feats_scaled]
-    return tuple(out)
-
+    X_C_cat = _norm_concat(X_C, Coef1, scaler_C).reshape(1, padding_size, -1)
+    X_H_cat = _norm_concat(X_H, Coef2, scaler_H).reshape(1, padding_size, -1)
+    X_N_cat = _norm_concat(X_N, Coef3, scaler_N).reshape(1, padding_size, -1)
+    X_O_cat = _norm_concat(X_O, Coef4, scaler_O).reshape(1, padding_size, -1)
+    return X_C_cat, X_H_cat, X_N_cat, X_O_cat
 
 def fp_norm(
-    X_C: np.ndarray,
-    X_H: np.ndarray,
-    X_N: np.ndarray,
-    X_O: np.ndarray,
+    X_C: np.ndarray, X_H: np.ndarray, X_N: np.ndarray, X_O: np.ndarray,
     padding_size: int,
-    scaler_paths: Tuple[str, str, str, str],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Apply MaxAbsScaler normalisation *without* appending charge coefficient."""
-    scalers = _load_scalers(scaler_paths)
-    tensors = [X_C, X_H, X_N, X_O]
+    scaler_paths: tuple[str, str, str, str]
+):
+    # 1) 先 load scalers (并做模块别名 hack)
+    scaler_C, scaler_H, scaler_N, scaler_O = _load_scalers(scaler_paths)
 
-    outs = []
-    for tens, sc in zip(tensors, scalers):
-        n_samples = tens.shape[0]
-        feat = tens.shape[-1]
-        flat = tens.reshape(n_samples * padding_size, feat)
-        norm = sc.transform(flat).reshape(n_samples, padding_size, feat).astype(np.float32)
-        outs.append(norm)
+    # 2) 对每个类别分别 reshape → transform → reshape 回原形
+    def _normalize(X_in: np.ndarray, scaler) -> np.ndarray:
+        # X_in: (n_samples, padding_size, feat_dim) → 展平成 (n_samples*padding_size, feat_dim)
+        nS, P, feat = X_in.shape
+        flat = X_in.reshape(-1, feat)
+        # 可能 scaler.scale_.shape=(feat,) 或其他，如果不匹配就底层会报错
+        flat_n = scaler.transform(flat)
+        return flat_n.reshape(nS, P, feat).astype(np.float32)
 
-    return tuple(outs)
+    X_Cn = _normalize(X_C, scaler_C)
+    X_Hn = _normalize(X_H, scaler_H)
+    X_Nn = _normalize(X_N, scaler_N)
+    X_On = _normalize(X_O, scaler_O)
+    return X_Cn, X_Hn, X_Nn, X_On
