@@ -6,7 +6,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-
+from .fp import fp_atom, fp_chg_norm, fp_norm
+from .data_io import get_efp_data, pad_efp_data
+from pathlib import Path
 from pymatgen.io.vasp.outputs import Poscar
 
 # dftpy/energy.py 顶部
@@ -198,19 +200,9 @@ class EnergyModel(nn.Module):
 # ------------------------------------------------------------------------------
 # Instantiate model given padding_size and input feature dims
 # ------------------------------------------------------------------------------
-def init_Emod(padding_size: int, dim_C: int = 709, dim_H: int = 577, dim_N: int = 709, dim_O: int = 709):
-    """
-    初始化 PyTorch 版能量模型，使用与原 Keras 结构相同的隐藏层配置。
-    输入参数：
-      - padding_size: 每个样本的原子最大数 (int)
-      - dim_C, dim_H, dim_N, dim_O: 对应每个元素类别的单原子输入维度
-
-    返回：
-      - model_E: EnergyModel 实例，尚未加载权重
-    """
+def init_Emod(padding_size: int, dim_C: int, dim_H: int, dim_N: int, dim_O: int):
     model = EnergyModel(dim_C, dim_H, dim_N, dim_O, padding_size).to(DEVICE)
     return model
-
 
 # ------------------------------------------------------------------------------
 # Load or freeze weights
@@ -676,55 +668,80 @@ def infer_energy(
 
 def train_energy_model(train_folders, val_folders, chg_model, padding_size, args):
     """
-    CLI -> dftpy.energy.train_energy_model(...) 的统一入口。
-    内部仍调用你先前写好的 retrain_emodel。
+    1) 用 get_efp_data 读训练/验证集原始数据
+    2) 用 pad_efp_data 把 fingerprint/basis/forces/pressure pad 到统一大小
+    3) 用 fp_norm 对 fingerprint 做归一化
+    4) 调用 retrain_emodel 进行真正的 PyTorch 训练
     """
-    import numpy as np
-    import os
-    from .data_io import get_efp_data, pad_efp_data, fp_norm, get_dos_e_train_data
 
-    # 0) 读入数据，做一次 padding & 特征准备
-    # ------------------------------------------------------------------
-    ener_ref, forces_pre, press_ref, X_pre, basis_pre, X_at, X_el, X_elem = \
-        get_efp_data(train_folders)
-    ener_val, forces_val, press_val, X_val_pre, basis_val_pre, X_at_val, X_el_val, X_elem_val = \
-        get_efp_data(val_folders)
+    # ──── 1) 读入训练/验证数据 ────
+    ener_ref, forces_pre, press_ref, X_pre, basis_pre, X_at, X_el, X_elem = get_efp_data(train_folders)
+    ener_val, forces_val, press_val, X_val_pre, basis_val_pre, X_at_val, X_el_val, X_elem_val = get_efp_data(val_folders)
 
-    padding_size = int(padding_size)   # 保持一致
+    padding_size = int(padding_size)  # ensure int
 
-    # 把指纹 / 基函数 / 力 全部 pad 到统一的 padding_size
+    # ──── 2) pad_efp_data: 把 fingerprint/basis/forces pad 到统一 (padding_size) ────
     forces1, forces2, forces3, forces4, \
     X_1, X_2, X_3, X_4, \
     basis1, basis2, basis3, basis4, \
     C_m, H_m, N_m, O_m = pad_efp_data(X_elem, X_pre, forces_pre, basis_pre, padding_size)
+
     forcesV1, forcesV2, forcesV3, forcesV4, \
     X_1V, X_2V, X_3V, X_4V, \
     basis1V, basis2V, basis3V, basis4V, \
     C_mV, H_mV, N_mV, O_mV = pad_efp_data(X_elem_val, X_val_pre, forces_val, basis_val_pre, padding_size)
 
-    # 调电荷模型对所有样本做一次“电荷加权 + 归一化”
+    # ──── 3) 拼出四个 scaler_paths 的绝对路径 ────
+    base_dir = Path(__file__).parent  # dftpy/ 目录
     scaler_paths = (
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_C.joblib"),
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_H.joblib"),
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_N.joblib"),
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_O.joblib"),
+        str(base_dir / "scalers" / "Scale_model_C.joblib"),
+        str(base_dir / "scalers" / "Scale_model_H.joblib"),
+        str(base_dir / "scalers" / "Scale_model_N.joblib"),
+        str(base_dir / "scalers" / "Scale_model_O.joblib"),
     )
-    X_C, X_H, X_N, X_O   = fp_norm(X_1,  X_2,  X_3,  X_4,  padding_size, scaler_paths)
+
+    # 用 fp_norm 对 fingerprint 做 MaxAbsScaler 归一化
+    X_C, X_H, X_N, X_O   = fp_norm(X_1, X_2, X_3, X_4, padding_size, scaler_paths)
     X_CV, X_HV, X_NV, X_OV = fp_norm(X_1V, X_2V, X_3V, X_4V, padding_size, scaler_paths)
 
-    # 1) 直接把数据喂给你原先的 retrain_emodel
-    # ------------------------------------------------------------------
+    # ──── 4) 自动计算 dim_C, dim_H, dim_N, dim_O ────
+    #    fingerprint dim = X_C.shape[-1]  （譬如 360）
+    #    basis dim       = basis1.shape[-1]  （即 9）
+    #    所以网络的输入维度 = fingerprint_dim + basis_dim = 360 + 9 = 369
+    fingerprint_dim = X_C.shape[-1]  # 举例是 360
+    basis_dim       = basis1.shape[-1]  # 9
+
+    dim_C = fingerprint_dim + basis_dim
+    dim_H = fingerprint_dim + basis_dim
+    dim_N = fingerprint_dim + basis_dim
+    dim_O = fingerprint_dim + basis_dim
+
+    # ──── 5) 调用 retrain_emodel，传入上面算好的 dim_C/… ────
     retrain_emodel(
+        # 训练集所有输入
         X_C, X_H, X_N, X_O,
         C_m, H_m, N_m, O_m,
         basis1, basis2, basis3, basis4,
         X_at, ener_ref, forces1, forces2, forces3, forces4, press_ref,
+        # 验证集所有输入
         X_CV, X_HV, X_NV, X_OV,
         C_mV, H_mV, N_mV, O_mV,
         basis1V, basis2V, basis3V, basis4V,
         X_at_val, ener_val, forcesV1, forcesV2, forcesV3, forcesV4, press_val,
+
+        # 训练配置
         epochs      = args.epochs,
         batch_size  = args.batch_size,
         patience    = args.patience,
-        padding_size= padding_size
+        padding_size= padding_size,
+
+        # **把网络输入维度改成 “360 + 9 = 369”**（而非以前写死的 709/577/709/709）
+        dim_C = dim_C,
+        dim_H = dim_H,
+        dim_N = dim_N,
+        dim_O = dim_O,
+
+        checkpoint_path = "best_emodel.pth"
     )
+
+    print("Energy model training done. Best weights saved as newEmodel.pth (in current working dir).")
