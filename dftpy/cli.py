@@ -18,7 +18,7 @@ def parse_args():
 
     # ========= “train” 子命令 ==========
     train_parser = subparsers.add_parser("train", help="Train models: chg/energy/dos/all")
-    train_parser.add_argument("--task", required=True, choices=["chg","energy","dos","all"])
+    train_parser.add_argument("--task", required=True, choices=["chg", "energy", "dos", "all"])
     train_parser.add_argument("--train-list", type=str, required=True, help="Train CSV, 列名为 files")
     train_parser.add_argument("--val-list", type=str, required=True, help="Val   CSV, 列名为 files")
     train_parser.add_argument("--epochs", type=int, default=100)
@@ -91,7 +91,7 @@ def main():
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
-            # 将 train_dos_model 的调用改为传 4 个参数：train_dos_model(train_folders, val_folders, chg_model, args)
+            # 【改动点：train_dos_model 只保留 4 个参数，不再传 padding_size】
             train_dos_model(train_folders, val_folders, chg_model, args)
 
     elif args.mode == "infer":
@@ -129,7 +129,7 @@ def main():
             # 需要与训练时的 dim_C/H/N/O 保持一致：
             # 训练时 fingerprint_dim=360, basis_dim=9 => dim_=360+9 = 369
             fingerprint_dim = 360
-            basis_dim       = 9
+            basis_dim = 9
             dim_C = fingerprint_dim + basis_dim
             dim_H = fingerprint_dim + basis_dim
             dim_N = fingerprint_dim + basis_dim
@@ -138,7 +138,7 @@ def main():
             try:
                 energy_model = load_pretrained_energy_model(
                     energy_ckpt,
-                    padding_size=int(get_max_atom_count(infer_folders)*args.padding_multiplier),
+                    padding_size=int(get_max_atom_count(infer_folders) * args.padding_multiplier),
                     dim_C=dim_C, dim_H=dim_H, dim_N=dim_N, dim_O=dim_O
                 )
             except FileNotFoundError as e:
@@ -151,7 +151,7 @@ def main():
             try:
                 dos_model = load_pretrained_dos_model(
                     dos_ckpt,
-                    padding_size=int(get_max_atom_count(infer_folders)*args.padding_multiplier)
+                    padding_size=int(get_max_atom_count(infer_folders) * args.padding_multiplier)
                 )
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载 DOS 模型权重: {e}")
@@ -167,7 +167,7 @@ def main():
                 try:
                     chg_vals = infer_charges(
                         folder, chg_model,
-                        int(get_max_atom_count(infer_folders)*args.padding_multiplier),
+                        int(get_max_atom_count(infer_folders) * args.padding_multiplier),
                         args
                     )
                     save_charges(chg_vals, os.path.join(args.output_dir, f"charges_{pdbasename}.txt"))
@@ -179,7 +179,7 @@ def main():
                 try:
                     e_val, forces, stress = infer_energy(
                         folder, chg_model, energy_model,
-                        int(get_max_atom_count(infer_folders)*args.padding_multiplier),
+                        int(get_max_atom_count(infer_folders) * args.padding_multiplier),
                         args
                     )
                     save_energy(e_val, forces, stress, os.path.join(args.output_dir, f"energy_{pdbasename}.txt"))
@@ -191,7 +191,7 @@ def main():
                 try:
                     energy_grid, dos_curve, vb, cb, bg, uncertainty = infer_dos(
                         folder, chg_model, dos_model,
-                        int(get_max_atom_count(infer_folders)*args.padding_multiplier),
+                        int(get_max_atom_count(infer_folders) * args.padding_multiplier),
                         args
                     )
                     save_dos(
