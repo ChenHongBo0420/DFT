@@ -56,7 +56,7 @@ def main():
 
     if args.mode == "train":
         # ─── 1) 读取 CSV，得到文件夹列表 ───
-        train_folders = read_file_list(args.train_list, col="files")
+        train_folders = read_file_list(args.train-list, col="files")
         val_folders = read_file_list(args.val_list, col="files")
 
         # ─── 2) 计算 padding_size: max_atom_count * padding_multiplier ───
@@ -84,15 +84,15 @@ def main():
 
         if args.task in ("dos", "all"):
             print("[INFO] 训练 DOS 模型 …")
-            # 必须先加载电荷模型
+            # （可选）先加载电荷模型，但train_dos_model并不需要它
             chg_ckpt = "best_chg.pth"
             try:
-                chg_model = load_pretrained_chg_model(chg_ckpt, padding_size)
+                _ = load_pretrained_chg_model(chg_ckpt, padding_size)
             except FileNotFoundError as e:
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
-            # 注意：train_dos_model 的签名是四个参数 (train_folders, val_folders, chg_model, args)
-            train_dos_model(train_folders, val_folders, chg_model, args)
+            # 直接传四个参数：train_folders, val_folders, padding_size, args
+            train_dos_model(train_folders, val_folders, padding_size, args)
 
     elif args.mode == "infer":
         # ─── 1) 读取 CSV，得到要预测的文件夹列表 ───
@@ -122,11 +122,9 @@ def main():
                 print(f"[ERROR] 无法加载电荷模型权重: {e}")
                 return
 
-        # ─── 3) 加载能量模型（如需要） ───
+        # ─── 3) 加载能量模型（如需） ───
         if args.predict_energy:
-            # 能量模型文件名：newEmodel.pth
             energy_ckpt = "newEmodel.pth"
-            # 与训练时一致：fingerprint_dim=360, basis_dim=9 → dim=369
             fingerprint_dim = 360
             basis_dim = 9
             dim_C = fingerprint_dim + basis_dim
@@ -144,7 +142,7 @@ def main():
                 print(f"[ERROR] 无法加载能量模型权重: {e}")
                 return
 
-        # ─── 4) 加载 DOS 模型（如需要） ───
+        # ─── 4) 加载 DOS 模型（如需） ───
         if args.predict_dos:
             dos_ckpt = "best_dos.pth"
             try:
@@ -165,7 +163,8 @@ def main():
             if args.predict_chg:
                 try:
                     chg_vals = infer_charges(
-                        folder, chg_model,
+                        folder,
+                        chg_model,
                         int(get_max_atom_count(infer_folders) * args.padding_multiplier),
                         args
                     )
@@ -177,7 +176,9 @@ def main():
             if args.predict_energy:
                 try:
                     e_val, forces, stress = infer_energy(
-                        folder, chg_model, energy_model,
+                        folder,
+                        chg_model,
+                        energy_model,
                         int(get_max_atom_count(infer_folders) * args.padding_multiplier),
                         args
                     )
@@ -189,7 +190,9 @@ def main():
             if args.predict_dos:
                 try:
                     energy_grid, dos_curve, vb, cb, bg, uncertainty = infer_dos(
-                        folder, chg_model, dos_model,
+                        folder,
+                        chg_model,
+                        dos_model,
                         int(get_max_atom_count(infer_folders) * args.padding_multiplier),
                         args
                     )
@@ -198,7 +201,7 @@ def main():
                         os.path.join(args.output_dir, f"dos_{pdbasename}.txt")
                     )
                     if args.plot_dos:
-                        # 可选：如果你在 utils 中实现了 plot_dos，就在此调用
+                        # 可选：如果在 utils 里实现了 plot_dos，就在此调用
                         # from .utils import plot_dos
                         # plot_dos(energy_grid, dos_curve, vb, cb, os.path.join(args.output_dir, f"dos_plot_{pdbasename}.png"))
                         pass
