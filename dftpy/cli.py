@@ -69,45 +69,54 @@ def _find_poscar(folder: str | Path) -> tuple[Path, Path]:
 # Patched: save charge‑coefficients as Coef_*.npy (C/H/N/O) per structure
 # -----------------------------------------------------------------------------
 
-def _save_coef_npy_for_folder(folder: str,
-                              chg_model: torch.nn.Module,
-                              padding_size: int,
-                              args):
-    """Infer per-atom charge coefficients and save four matrices (C/H/N/O)."""
+def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_size: int, args):
+    """Infer per‑atom charge coefficients and save four matrices (C/H/N/O)."""
 
-    # 1️⃣  Robustly locate the POSCAR file
+    # 1️⃣  Robustly locate the POSCAR file & decide where to save outputs
     poscar_path, base_dir = _find_poscar(folder)
 
-    # 2️⃣  Infer charge coefficients
-    all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
+    # 2️⃣  Infer charge coefficients (expects (N_atoms, feat_dim))
+        all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
     if isinstance(all_coef, torch.Tensor):
         all_coef = all_coef.detach().cpu().numpy()
 
-    # 🔧 兼容旧版 infer_charges：若返回 1D (N,) → 升维成 (N,1)
+    # 🔧 兼容旧版 infer_charges：若返回一维 (N,) 电荷值，
+    #    也人工升维成 (N,1)，保证后续切片通用。
     if all_coef.ndim == 1:
-        all_coef = all_coef.reshape(-1, 1)
+        all_coef = all_coef.reshape(-1, 1)(all_coef, torch.Tensor):
+        all_coef = all_coef.detach().cpu().numpy()
 
-    # 3️⃣  Count atoms by element (C/H/N/O)
-    struct = Poscar.from_file(str(poscar_path)).structure
+    # 3️⃣  Count atoms by element order C/H/N/O
+    #       (use Poscar directly to avoid utils.read_poscar adding an extra “/POSCAR”)
+    struct = Poscar.from_file(str(poscar_path)).structure  # ← key fix
     elem_counts = [struct.species.count(e) for e in ("C", "H", "N", "O")]
     at_C, at_H, at_N, at_O = elem_counts
     total_atoms = sum(elem_counts)
 
     if all_coef.shape[0] != total_atoms:
-        raise ValueError(f"{base_dir}: 系数行数 {all_coef.shape[0]} ≠ 原子数 {total_atoms}")
+        raise ValueError(
+            f"{base_dir}: 系数行数 {all_coef.shape[0]} 与原子总数 {total_atoms} 不一致"
+        )
 
-    # 4️⃣  Split & save …
+    # 4️⃣  Split & save  Split & save
     i1 = at_C
     i2 = i1 + at_H
     i3 = i2 + at_N
+
     coef_split = {
         "C": all_coef[0:i1, :],
         "H": all_coef[i1:i2, :],
         "N": all_coef[i2:i3, :],
         "O": all_coef[i3:total_atoms, :],
     }
-    for elem, mat in coef_split.items():
-        np.save(str(base_dir / f"Coef_{elem}.npy"), mat.astype(np.float32))
+
+        for elem, mat in coef_split.items():
+        # ⚙️  Save as 1‑D if it is simply (N,1); this matches fp_chg_norm expectations
+        if mat.ndim == 2 and mat.shape[1] == 1:
+            mat_to_save = mat[:, 0].astype(np.float32)  # → (N,)
+        else:
+            mat_to_save = mat.astype(np.float32)
+        np.save(str(base_dir / f"Coef_{elem}.npy"), mat_to_save)(str(base_dir / f"Coef_{elem}.npy"), mat.astype(np.float32))
 
 
 def parse_args():
