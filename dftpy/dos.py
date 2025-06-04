@@ -195,11 +195,10 @@ class DOSDataset(Dataset):
 # ---------------------------------------------------------------------------
 
 def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, ...]:
-    """Prepare a single structure for DOS training or inference."""
-    # POSCAR to structure --------------------------------------------------
-    struct: Structure = Poscar.from_file(Path(folder) / "POSCAR").structure
+    """Prepare one structure for DOS training / inference."""
 
-    # Atomic counts --------------------------------------------------------
+    # -------- read structure & element counts ----------------------------
+    struct = Poscar.from_file(Path(folder) / "POSCAR").structure
     elem_dict = {"C": 0, "H": 0, "N": 0, "O": 0}
     for s in struct:
         sym = s.specie.symbol
@@ -207,10 +206,10 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
             elem_dict[sym] += 1
     at_elem = [elem_dict[e] for e in ("C", "H", "N", "O")]
 
-    # Raw fingerprints -----------------------------------------------------
-    from .fp import fp_atom  # local import to avoid cycle during package init
+    # -------- raw fingerprints (4 × 3-D) ---------------------------------
+    from .fp import fp_atom  # local import to avoid circular deps
 
-    dset, basis_mat, _, _, _ = fp_atom(
+    dset, basis_mat, *_ = fp_atom(
         struct,
         args.grid_spacing,
         args.cut_off_rad,
@@ -219,67 +218,42 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         args.num_gamma,
     )
 
-    # Pad & split by element ---------------------------------------------
     (
-        X_3D1,
-        X_3D2,
-        X_3D3,
-        X_3D4,
-        _,
-        _,
-        _,
-        _,
-        C_m_1,
-        H_m_1,
-        N_m_1,
-        O_m_1,
+        X_3D1, X_3D2, X_3D3, X_3D4,  # fingerprints
+        _, _, _, _,                  # unused grads
+        C_m_1, H_m_1, N_m_1, O_m_1,  # masks
     ) = chg_data(dset, basis_mat, *at_elem, padding_size)
 
-    # Charge coefficients --------------------------------------------------
-    coef_files = [
-        Path(folder) / f"Coef_{e}.npy" for e in ("C", "H", "N", "O")
-    ]
-    if not all(f.exists() for f in coef_files):
-        raise FileNotFoundError("Coef_*.npy files are required for DOS training.")
-    Coef_C, Coef_H, Coef_N, Coef_O = [np.load(f).astype(np.float32) for f in coef_files]
+    # -------- charge-derived coefficients --------------------------------
+    coef_paths = [Path(folder) / f"Coef_{e}.npy" for e in ("C", "H", "N", "O")]
+    if not all(p.exists() for p in coef_paths):
+        raise FileNotFoundError("Missing Coef_*.npy — run charge→coef export first.")
+    Coef_C, Coef_H, Coef_N, Coef_O = [np.load(p).astype(np.float32) for p in coef_paths]
 
+    # -------- concatenate & normalise ------------------------------------
     X_C_aug, X_H_aug, X_N_aug, X_O_aug = fp_chg_norm(
-        Coef_C[np.newaxis, :, :],
-        Coef_H[np.newaxis, :, :],
-        Coef_N[np.newaxis, :, :],
-        Coef_O[np.newaxis, :, :],
-        X_3D1,
-        X_3D2,
-        X_3D3,
-        X_3D4,
+        X_3D1, X_3D2, X_3D3, X_3D4,        # 4 × (P, feat_fp)
+        Coef_C, Coef_H, Coef_N, Coef_O,    # 4 × (P, coeff_dim) – same 2-D dims
         padding_size,
         SCALER_PATHS,
     )
 
-    # Masks ---------------------------------------------------------------
+    # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
 
-    # Label ----------------------------------------------------------------
-    elec = np.array([
-        {6: 4, 1: 1, 7: 5, 8: 6}[z] for z in struct.atomic_numbers
-    ], dtype=np.float32).sum()
-    Prop_dos, VB, CB = _read_dos(folder, elec)
+    # -------- ground-truth DOS & band edges ------------------------------
+    elec_per_atom = {6: 4, 1: 1, 7: 5, 8: 6}
+    total_elec = np.array([elec_per_atom[z] for z in struct.atomic_numbers], dtype=np.float32).sum()
+    Prop_dos, VB, CB = _read_dos(folder, total_elec)
     VB_CB = np.array([-VB, -CB], dtype=np.float32)
 
+    # -------- return (each item shape matches fp_chg_norm expectations) ---
     return (
-        X_C_aug.squeeze(0),
-        X_H_aug.squeeze(0),
-        X_N_aug.squeeze(0),
-        X_O_aug.squeeze(0),
-        np.array([elec], dtype=np.float32),
-        C_d.squeeze(0),
-        H_d.squeeze(0),
-        N_d.squeeze(0),
-        O_d.squeeze(0),
-        Prop_dos,
-        VB_CB,
+        X_C_aug, X_H_aug, X_N_aug, X_O_aug,              # 4 × (P, feat_all)
+        np.array([total_elec], dtype=np.float32),        # (1,)
+        C_d, H_d, N_d, O_d,                             # 4 × (P, DOS_POINTS)
+        Prop_dos, VB_CB,
     )
-
 
 # ---------------------------------------------------------------------------
 #  Public helpers (train / load / infer)
