@@ -115,7 +115,9 @@ def _prepare(
         return pad
 
     for fld in folders:
-        struct = Poscar.from_file(Path(fld) / "POSCAR").structure
+        # struct = Poscar.from_file(Path(fld) / "POSCAR").structure
+        from .data_io import read_poscar
+        struct = read_poscar(fld)
         dset, basis, _, _, ats = fp_atom(
             struct,
             args.grid_spacing, args.cut_off_rad,
