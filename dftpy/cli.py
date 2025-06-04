@@ -81,7 +81,8 @@ def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_s
         all_coef = all_coef.detach().cpu().numpy()
 
     # 3️⃣  Count atoms by element order C/H/N/O
-    struct = read_poscar(str(poscar_path))
+    #       (use Poscar directly to avoid utils.read_poscar adding an extra “/POSCAR”)
+    struct = Poscar.from_file(str(poscar_path)).structure  # ← key fix
     elem_counts = [struct.species.count(e) for e in ("C", "H", "N", "O")]
     at_C, at_H, at_N, at_O = elem_counts
     total_atoms = sum(elem_counts)
@@ -91,7 +92,7 @@ def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_s
             f"{base_dir}: 系数行数 {all_coef.shape[0]} 与原子总数 {total_atoms} 不一致"
         )
 
-    # 4️⃣  Split & save
+    # 4️⃣  Split & save  Split & save
     i1 = at_C
     i2 = i1 + at_H
     i3 = i2 + at_N
