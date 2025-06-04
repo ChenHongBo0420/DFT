@@ -53,8 +53,15 @@ def read_file_list(csv_path: str, col: str):
 
 
 def read_poscar(folder: str):
-    poscar_path = Path(folder).joinpath("POSCAR")
-    return Poscar.from_file(poscar_path).structure
+    """优先把 folder/POSCAR 当作文件，如果不存在，再看 folder/POSCAR/POSCAR"""
+    base = Path(folder) / "POSCAR"
+    if base.is_file():
+        return Poscar.from_file(base).structure
+    nested = base / "POSCAR"
+    if nested.is_file():
+        return Poscar.from_file(nested).structure
+    raise FileNotFoundError(f"在目录 {folder} 下无法找到 POSCAR 文件")
+
 
 
 def save_charges(chg_vals: np.ndarray, filepath: str):
@@ -82,9 +89,29 @@ def save_dos(energy_grid: np.ndarray, dos_vals: np.ndarray,
         f.write(f"Conduction band minimum (CB): {cb:.6f} eV\n")
         f.write(f"Bandgap (BG): {bg:.6f} eV\n")
 
-
 def get_max_atom_count(folders: List[str]) -> int:
-    return max(read_poscar(f).num_sites for f in folders)
+    """
+    兼容以下两种目录布局：
+      1) 样本目录下直接有一个“POSCAR”文件
+      2) 样本目录下有一个“POSCAR/”子目录，里面才是真正的 POSCAR 文件
+    """
+    max_count = 0
+    for f in folders:
+        # 先尝试把 f/POSCAR 当作文件
+        poscar_candidate = os.path.join(f, "POSCAR")
+        if os.path.isfile(poscar_candidate):
+            poscar_file = poscar_candidate
+        else:
+            # 如果 f/POSCAR 不是文件，再尝试 f/POSCAR/POSCAR
+            nested = os.path.join(poscar_candidate, "POSCAR")
+            if os.path.isfile(nested):
+                poscar_file = nested
+            else:
+                raise FileNotFoundError(f"在目录 {f} 下未找到 POSCAR 文件")
+        struct = Poscar.from_file(poscar_file).structure
+        if struct.num_sites > max_count:
+            max_count = struct.num_sites
+    return max_count
 
 
 # ---------------------------- pad / reshape 工具 ----------------------------
