@@ -277,31 +277,7 @@ def _norm_concat(
     coef_in: np.ndarray,
     scaler
 ) -> np.ndarray:
-    """
-    Normalize `X_in` with the given *scaler* and concatenate with `coef_in`
-    along the feature axis.
-
-    Parameters
-    ----------
-    X_in
-        Fingerprint sub-matrix shaped ``(padding_size, feat_dim)``.
-    coef_in
-        Charge-coefficients sub-matrix shaped ``(padding_size, coef_dim)``.
-    scaler
-        A fitted `sklearn.preprocessing.MaxAbsScaler`.
-
-    Returns
-    -------
-    np.ndarray
-        Concatenated matrix ``(padding_size, feat_dim + coef_dim)``.
-
-    Notes
-    -----
-    If *feat_dim* is **0** (the element is absent in current structure),
-    `scaler.transform` would normally raise *"Found array with 0 feature(s)"*.
-    In that case we **skip** the scaler and keep the empty matrix so the code
-    continues to work.
-    """
+    
     if X_in.shape[1] == 0:
         arr_norm = X_in.astype(np.float32)           # (P, 0)
     else:
@@ -310,40 +286,13 @@ def _norm_concat(
     return np.concatenate([arr_norm, coef_in], axis=1)
 
 
-# ---------------------------------------------------------------------------
-#  fp_chg_norm : fingerprints + charge-coefficients → network输入
-# ---------------------------------------------------------------------------
-
 def fp_chg_norm(
     X_C: np.ndarray, X_H: np.ndarray, X_N: np.ndarray, X_O: np.ndarray,
     Coef_C: np.ndarray, Coef_H: np.ndarray, Coef_N: np.ndarray, Coef_O: np.ndarray,
     padding_size: int,
     scaler_paths: tuple[str, str, str, str],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Combine **fingerprints** and **charge coefficients** for C / H / N / O
-    and apply MaxAbsScaler normalisation.
 
-    All eight matrices are first reshaped to ``(padding_size, feat)`` then
-    passed through `_norm_concat`.  The returned tensors are shaped
-    ``(1, padding_size, feat_total)`` – ready to feed into the DOS network.
-
-    Parameters
-    ----------
-    X_* / Coef_*
-        Fingerprint blocks and charge-coefficient blocks for each element.
-    padding_size
-        Maximum number of atoms (per structure) after padding.
-    scaler_paths
-        Tuple with four `.joblib` paths:
-        ``(Scale_model_C, Scale_model_H, Scale_model_N, Scale_model_O)``.
-
-    Returns
-    -------
-    tuple
-        ``(X_C_cat, X_H_cat, X_N_cat, X_O_cat)``, each shaped
-        ``(1, padding_size, feat_total)``.
-    """
     scaler_C, scaler_H, scaler_N, scaler_O = _load_scalers(scaler_paths)
 
     def _proc(X: np.ndarray, Coef: np.ndarray, scaler):
