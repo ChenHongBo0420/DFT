@@ -1,85 +1,110 @@
 # dftpy/cli.py
-
 import argparse
 import os
-import torch
-import numpy as np
 from pathlib import Path
 
+import numpy as np
+import torch
+from pymatgen.io.vasp.inputs import Poscar  # only used for type hints / IDE help
+
 from .utils import silence_deprecation_warnings, read_poscar
-from .data_io import read_file_list, get_max_atom_count, save_charges, save_energy, save_dos
-from .chg import train_chg_model, load_pretrained_chg_model, infer_charges
-from .energy import train_energy_model, load_pretrained_energy_model, infer_energy
-from .dos import train_dos_model, load_pretrained_dos_model, infer_dos
+from .data_io import (
+    get_max_atom_count,
+    read_file_list,
+    save_charges,
+    save_dos,
+    save_energy,
+)
+from .chg import infer_charges, load_pretrained_chg_model, train_chg_model
+from .dos import infer_dos, load_pretrained_dos_model, train_dos_model
+from .energy import (
+    infer_energy,
+    load_pretrained_energy_model,
+    train_energy_model,
+)
 
 # -----------------------------------------------------------------------------
-# 新增：用于将推理出的电荷系数拆分并保存为 Coef_C.npy、Coef_H.npy、Coef_N.npy、Coef_O.npy
+# NEW: robust helper to locate POSCAR file no matter what path we receive
 # -----------------------------------------------------------------------------
-def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_size: int, args):
+
+def _find_poscar(folder: str | Path) -> tuple[Path, Path]:
+    """Return (poscar_path, base_dir).
+
+    The CSV entry might be:
+    1. structure root – e.g. …/R1000003
+    2. “POSCAR” directory – e.g. …/R1000003/POSCAR
+    3. POSCAR file – e.g. …/R1000003/POSCAR or …/R1000003/POSCAR/POSCAR
+
+    We scan in the following order and stop at the first file hit:
+      • <folder>               (if file and name == POSCAR)
+      • <folder>/POSCAR        (file)
+      • <folder>/POSCAR/POSCAR (file)
+
+    base_dir is chosen as the *directory where we will store Coef_*.npy*.
+    Here we keep it simple: use the **directory that directly contains
+    the POSCAR file** – this works for all training / inference paths.
     """
-    对单个“folder”：
-    - folder 可能是一个“目录”（目录里有 POSCAR），
-      也可能直接是一个 POSCAR 文件路径。
-    本函数会先定位到真正的 POSCAR 文件，然后调用 infer_charges 算出所有原子电荷系数，
-    接着根据结构里 C/H/N/O 的原子数目，把所有系数矩阵按元素依次切分，
-    并分别保存为 folder/Coef_C.npy、folder/Coef_H.npy、folder/Coef_N.npy、folder/Coef_O.npy。
-    """
-    p = Path(folder)
-    # 1) 定位到 POSCAR 文件
-    if p.is_file() and p.name.upper() == "POSCAR":
-        poscar_path = p
-        base_dir = p.parent
+
+    f = Path(folder)
+    candidates: list[Path] = []
+
+    # Case 1: user passed the POSCAR file directly
+    if f.is_file() and f.name.upper() == "POSCAR":
+        candidates.append(f)
     else:
-        poscar_path = p / "POSCAR"
-        base_dir = p
-    if not poscar_path.is_file():
-        raise FileNotFoundError(f"找不到 POSCAR 文件：{poscar_path}")
+        # Case 2 & 3: structure dir or POSCAR dir
+        candidates.extend([
+            f / "POSCAR",
+            f / "POSCAR" / "POSCAR",
+        ])
 
-    # 2) 用 infer_charges 得到 “所有原子电荷系数” — NumPy 数组 or Tensor
-    #    注意：infer_charges 返回的是“二维 NumPy 数组”：shape=(N_total_atoms, )
-    #    但我们在之前改过的 infer_charges 中，会返回一个一维 array “全原子序列”的电荷值列表。
-    #    为了训练 DOS，我们需要“每个原子的 exp/coef 特征矩阵”，不是直接的电荷值。
-    #    这里假设 infer_charges 已修改为直接返回“每个原子 exp/coef 矩阵”（shape = (N_total_atoms, feat_dim)）。
-    #
-    #    如果你当前的 infer_charges 还是返回一维电荷列表，那么你需要另行调整逻辑：
-    #    ——本示例假设 infer_charges 已经按 “Chg->C,H,N,O 四支通路的 exp/coef” 直接输出矩阵，
-    #      如果不是，需要把推理接口改为输出那 4 个元素的系数矩阵（见前面解答）。
-    #
-    #    下面示例以 infer_charges 返回 (N_total_atoms, feat_dim) 为前提。
+    for c in candidates:
+        if c.is_file():
+            return c, c.parent  # poscar_path, base_dir
+
+    raise FileNotFoundError(f"在路径 {folder} 及其下级目录中未找到 POSCAR 文件")
+
+
+# -----------------------------------------------------------------------------
+# Patched: save charge‑coefficients as Coef_*.npy (C/H/N/O) per structure
+# -----------------------------------------------------------------------------
+
+def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_size: int, args):
+    """Infer per‑atom charge coefficients and save four matrices (C/H/N/O)."""
+
+    # 1️⃣  Robustly locate the POSCAR file & decide where to save outputs
+    poscar_path, base_dir = _find_poscar(folder)
+
+    # 2️⃣  Infer charge coefficients (expects (N_atoms, feat_dim))
     all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
-    # 如果 infer_charges 返回的是 Tensor，需要先 detach, cpu, numpy
     if isinstance(all_coef, torch.Tensor):
         all_coef = all_coef.detach().cpu().numpy()
 
-    # 3) 读取 POSCAR 得到结构，统计 C/H/N/O 原子数目
+    # 3️⃣  Count atoms by element order C/H/N/O
     struct = read_poscar(str(poscar_path))
     elem_counts = [struct.species.count(e) for e in ("C", "H", "N", "O")]
     at_C, at_H, at_N, at_O = elem_counts
-    total_atoms = at_C + at_H + at_N + at_O
+    total_atoms = sum(elem_counts)
 
-    # 4) 检查 all_coef 行数是否等于 total_atoms
     if all_coef.shape[0] != total_atoms:
         raise ValueError(
-            f"在文件夹 {base_dir} 中，infer_charges 返回的系数行数 {all_coef.shape[0]} "
-            f"与结构实际原子数 {total_atoms} 不一致。"
+            f"{base_dir}: 系数行数 {all_coef.shape[0]} 与原子总数 {total_atoms} 不一致"
         )
 
-    # 5) 把 all_coef 按 [C, H, N, O] 拆分
+    # 4️⃣  Split & save
     i1 = at_C
-    i2 = at_C + at_H
-    i3 = at_C + at_H + at_N
-    i4 = total_atoms
+    i2 = i1 + at_H
+    i3 = i2 + at_N
 
-    Coef_C = all_coef[0:i1, :].astype(np.float32) if at_C > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
-    Coef_H = all_coef[i1:i2, :].astype(np.float32) if at_H > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
-    Coef_N = all_coef[i2:i3, :].astype(np.float32) if at_N > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
-    Coef_O = all_coef[i3:i4, :].astype(np.float32) if at_O > 0 else np.zeros((0, all_coef.shape[1]), dtype=np.float32)
+    coef_split = {
+        "C": all_coef[0:i1, :],
+        "H": all_coef[i1:i2, :],
+        "N": all_coef[i2:i3, :],
+        "O": all_coef[i3:total_atoms, :],
+    }
 
-    # 6) 将这四个矩阵分别保存到各自文件夹
-    np.save(str(base_dir / "Coef_C.npy"), Coef_C)
-    np.save(str(base_dir / "Coef_H.npy"), Coef_H)
-    np.save(str(base_dir / "Coef_N.npy"), Coef_N)
-    np.save(str(base_dir / "Coef_O.npy"), Coef_O)
+    for elem, mat in coef_split.items():
+        np.save(str(base_dir / f"Coef_{elem}.npy"), mat.astype(np.float32))
 
 
 def parse_args():
