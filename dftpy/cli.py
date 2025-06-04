@@ -69,40 +69,42 @@ def _find_poscar(folder: str | Path) -> tuple[Path, Path]:
 # Patched: save charge‑coefficients as Coef_*.npy (C/H/N/O) per structure
 # -----------------------------------------------------------------------------
 
-def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_size: int, args):
-    """Infer per‑atom charge coefficients and save four matrices (C/H/N/O)."""
+def _save_coef_npy_for_folder(
+        folder: str,
+        chg_model: torch.nn.Module,
+        padding_size: int,
+        args):
+    """对单个 structure 生成 Coef_C/H/N/O.npy。"""
 
-    # 1️⃣  Robustly locate the POSCAR file & decide where to save outputs
+    # 1️⃣ 找到真实 POSCAR 文件
     poscar_path, base_dir = _find_poscar(folder)
 
-    # 2️⃣  Infer charge coefficients (expects (N_atoms, feat_dim))
-        all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
+    # 2️⃣ 推理得到 “每原子系数矩阵”
+    all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
     if isinstance(all_coef, torch.Tensor):
         all_coef = all_coef.detach().cpu().numpy()
 
-    # 🔧 兼容旧版 infer_charges：若返回一维 (N,) 电荷值，
-    #    也人工升维成 (N,1)，保证后续切片通用。
+    # —— 若 infer_charges 只返回一维 (N,) 电荷值 → 升成 (N,1)
     if all_coef.ndim == 1:
-        all_coef = all_coef.reshape(-1, 1)(all_coef, torch.Tensor):
-        all_coef = all_coef.detach().cpu().numpy()
+        all_coef = all_coef.reshape(-1, 1)
 
-    # 3️⃣  Count atoms by element order C/H/N/O
-    #       (use Poscar directly to avoid utils.read_poscar adding an extra “/POSCAR”)
-    struct = Poscar.from_file(str(poscar_path)).structure  # ← key fix
-    elem_counts = [struct.species.count(e) for e in ("C", "H", "N", "O")]
-    at_C, at_H, at_N, at_O = elem_counts
-    total_atoms = sum(elem_counts)
+    # 3️⃣ 统计各元素原子数
+    struct = Poscar.from_file(str(poscar_path)).structure
+    at_C = struct.species.count("C")
+    at_H = struct.species.count("H")
+    at_N = struct.species.count("N")
+    at_O = struct.species.count("O")
+    total_atoms = at_C + at_H + at_N + at_O
 
     if all_coef.shape[0] != total_atoms:
         raise ValueError(
-            f"{base_dir}: 系数行数 {all_coef.shape[0]} 与原子总数 {total_atoms} 不一致"
+            f"{base_dir}: 系数行数 {all_coef.shape[0]} ≠ 原子总数 {total_atoms}"
         )
 
-    # 4️⃣  Split & save  Split & save
+    # 4️⃣ 拆分 & 保存
     i1 = at_C
     i2 = i1 + at_H
     i3 = i2 + at_N
-
     coef_split = {
         "C": all_coef[0:i1, :],
         "H": all_coef[i1:i2, :],
@@ -110,13 +112,13 @@ def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_s
         "O": all_coef[i3:total_atoms, :],
     }
 
-        for elem, mat in coef_split.items():
-        # ⚙️  Save as 1‑D if it is simply (N,1); this matches fp_chg_norm expectations
+    for elem, mat in coef_split.items():
+        # fp_chg_norm 期望 1-D (P,)；若只有 1 列则压扁
         if mat.ndim == 2 and mat.shape[1] == 1:
-            mat_to_save = mat[:, 0].astype(np.float32)  # → (N,)
+            mat_to_save = mat[:, 0].astype(np.float32)
         else:
             mat_to_save = mat.astype(np.float32)
-        np.save(str(base_dir / f"Coef_{elem}.npy"), mat_to_save)(str(base_dir / f"Coef_{elem}.npy"), mat.astype(np.float32))
+        np.save(str(base_dir / f"Coef_{elem}.npy"), mat_to_save)
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="dftpy", description="PyTorch-based ML-DFT: charge, energy, DOS")
