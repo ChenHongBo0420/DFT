@@ -272,27 +272,58 @@ def _load_scalers(paths: tuple[str, str, str, str]):
         scalers.append(load(p))
     return tuple(scalers)
 
+def _norm_concat(X_in: np.ndarray,
+                 coef_in: np.ndarray,
+                 scaler) -> np.ndarray:
+    """
+    • *X_in*  : (padding_size, feat_dim)   — 原始 fingerprint 子矩阵
+    • *coef_in*: (padding_size, coef_dim)  — 对应原子系数矩阵
+
+    当 feat_dim == 0（即该元素在当前结构完全缺失）时，
+    直接返回 “空特征 + 系数” 拼接结果，**跳过 scaler.transform**，从而避免
+    scikit-learn 的 “Found array with 0 feature(s)” 异常。
+    """
+    if X_in.shape[1] == 0:
+        arr_n = X_in.astype(np.float32)          # (P, 0)
+    else:
+        arr_n = scaler.transform(X_in)           # (P, feat_dim)
+
+    return np.concatenate([arr_n, coef_in], axis=1)   # (P, feat_dim + coef_dim)
+
+
+# ---------------------------  fp_chg_norm  ----------------------------------
+
 def fp_chg_norm(
-    Coef1: np.ndarray, Coef2: np.ndarray, Coef3: np.ndarray, Coef4: np.ndarray,
     X_C: np.ndarray, X_H: np.ndarray, X_N: np.ndarray, X_O: np.ndarray,
+    Coef_C: np.ndarray, Coef_H: np.ndarray, Coef_N: np.ndarray, Coef_O: np.ndarray,
     padding_size: int,
-    scaler_paths: tuple[str, str, str, str]
+    scaler_paths: tuple[str, str, str, str],
 ):
+    """
+    参数顺序 = [四块指纹] + [四块系数] + padding_size + scaler_paths
+    返回值   = 4 × (1, padding_size, feat_all)
+    """
     scaler_C, scaler_H, scaler_N, scaler_O = _load_scalers(scaler_paths)
 
-    def _norm_concat(X_in, coef_in, scaler):
-        # X_in: (1, padding_size, feat_dim)
-        # coef_in: (padding_size, coef_dim)
-        arr = X_in.reshape(padding_size, -1)     # (P, feat_dim)
-        arr_n = scaler.transform(arr)            # (P, feat_dim)
-        return np.concatenate([arr_n, coef_in], axis=1)  # (P, feat_dim + coef_dim)
+    # 先确保所有输入都是 (padding_size, feat) 形状 --------------------
+    X_C = X_C.reshape(padding_size, -1)
+    X_H = X_H.reshape(padding_size, -1)
+    X_N = X_N.reshape(padding_size, -1)
+    X_O = X_O.reshape(padding_size, -1)
 
-    X_C_cat = _norm_concat(X_C, Coef1, scaler_C).reshape(1, padding_size, -1)
-    X_H_cat = _norm_concat(X_H, Coef2, scaler_H).reshape(1, padding_size, -1)
-    X_N_cat = _norm_concat(X_N, Coef3, scaler_N).reshape(1, padding_size, -1)
-    X_O_cat = _norm_concat(X_O, Coef4, scaler_O).reshape(1, padding_size, -1)
+    Coef_C = Coef_C.reshape(padding_size, -1)
+    Coef_H = Coef_H.reshape(padding_size, -1)
+    Coef_N = Coef_N.reshape(padding_size, -1)
+    Coef_O = Coef_O.reshape(padding_size, -1)
+
+    # 正规化 + 拼接 ------------------------------------------------------
+    X_C_cat = _norm_concat(X_C, Coef_C, scaler_C).reshape(1, padding_size, -1)
+    X_H_cat = _norm_concat(X_H, Coef_H, scaler_H).reshape(1, padding_size, -1)
+    X_N_cat = _norm_concat(X_N, Coef_N, scaler_N).reshape(1, padding_size, -1)
+    X_O_cat = _norm_concat(X_O, Coef_O, scaler_O).reshape(1, padding_size, -1)
+
     return X_C_cat, X_H_cat, X_N_cat, X_O_cat
-
+    
 def fp_norm(
     X_C: np.ndarray, X_H: np.ndarray, X_N: np.ndarray, X_O: np.ndarray,
     padding_size: int,
