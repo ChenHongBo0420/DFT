@@ -76,8 +76,14 @@ def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_s
     poscar_path, base_dir = _find_poscar(folder)
 
     # 2️⃣  Infer charge coefficients (expects (N_atoms, feat_dim))
-    all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
+        all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
     if isinstance(all_coef, torch.Tensor):
+        all_coef = all_coef.detach().cpu().numpy()
+
+    # 🔧 兼容旧版 infer_charges：若返回一维 (N,) 电荷值，
+    #    也人工升维成 (N,1)，保证后续切片通用。
+    if all_coef.ndim == 1:
+        all_coef = all_coef.reshape(-1, 1)(all_coef, torch.Tensor):
         all_coef = all_coef.detach().cpu().numpy()
 
     # 3️⃣  Count atoms by element order C/H/N/O
@@ -106,7 +112,6 @@ def _save_coef_npy_for_folder(folder: str, chg_model: torch.nn.Module, padding_s
 
     for elem, mat in coef_split.items():
         np.save(str(base_dir / f"Coef_{elem}.npy"), mat.astype(np.float32))
-
 
 def parse_args():
     parser = argparse.ArgumentParser(prog="dftpy", description="PyTorch-based ML-DFT: charge, energy, DOS")
