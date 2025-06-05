@@ -460,7 +460,6 @@ class DOSDataset(Dataset):
 #     )
 
 
-
 def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, ...]:
     """
     Prepare one structure for DOS training/inference, using fp_norm for MaxAbsScaler normalization.
@@ -494,43 +493,59 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         args.num_gamma,
     )
 
-    # chg_data 返回：
-    #   X_3D1..X_3D4  → 可能形状 (padding_size, feat_raw) 或 (1, padding_size, feat_raw)
-    #   _, _, _, _    → 占位（grad 信息，不使用）
-    #   C_m_1..O_m_1  → 可能形状 (padding_size, DOS_POINTS) 或 (1, padding_size, DOS_POINTS)
+    # chg_data 返回四个 X_3D*，可能是 (1, P, feat_raw) 或 (P, feat_raw)
     X_3D1, X_3D2, X_3D3, X_3D4, _, _, _, _, C_m_1, H_m_1, N_m_1, O_m_1 = chg_data(
         dset, basis_mat, *at_elem, padding_size
     )
 
-    # -------- squeeze to (padding_size, D) if needed -----------------------
+    # -------- squeeze 到 (P, feat_raw) ---------------------------------------
     def _squeeze_if_needed(arr: np.ndarray) -> np.ndarray:
         if arr.ndim == 3 and arr.shape[0] == 1:
             return arr[0]
         return arr
 
-    X_3D1 = _squeeze_if_needed(X_3D1)
+    X_3D1 = _squeeze_if_needed(X_3D1)  # 形状变为 (P, feat_raw)
     X_3D2 = _squeeze_if_needed(X_3D2)
     X_3D3 = _squeeze_if_needed(X_3D3)
     X_3D4 = _squeeze_if_needed(X_3D4)
 
-    C_m_1 = _squeeze_if_needed(C_m_1)
+    C_m_1 = _squeeze_if_needed(C_m_1)  # (P, 341)
     H_m_1 = _squeeze_if_needed(H_m_1)
     N_m_1 = _squeeze_if_needed(N_m_1)
     O_m_1 = _squeeze_if_needed(O_m_1)
 
-    # -------- normalize fingerprints to 360 dims via MaxAbsScaler -----------
-    # fp_norm expects inputs of shape (n_samples, P, feat_raw), so add a leading dim=1
-    X_3D1_batch = X_3D1[np.newaxis, ...]  # → (1, P, feat_raw)
-    X_3D2_batch = X_3D2[np.newaxis, ...]
-    X_3D3_batch = X_3D3[np.newaxis, ...]
-    X_3D4_batch = X_3D4[np.newaxis, ...]
+    # -------- pad_or_trunc: 把 (P, feat_raw) → (P, 360)  ----------------------
+    def _pad_or_trunc_feat(arr: np.ndarray, target_dim: int = 360) -> np.ndarray:
+        P, D = arr.shape
+        assert P == padding_size, f"Expected {padding_size} rows, got {P}"
+        if D == target_dim:
+            return arr.copy()
+        if D > target_dim:
+            return arr[:, :target_dim]
+        # D < target_dim，需要右侧补零
+        pad_width = target_dim - D
+        pad_block = np.zeros((P, pad_width), dtype=arr.dtype)
+        return np.concatenate([arr, pad_block], axis=-1)
 
+    Xc_pt = _pad_or_trunc_feat(X_3D1, 360)  # (P, 360)
+    Xh_pt = _pad_or_trunc_feat(X_3D2, 360)
+    Xn_pt = _pad_or_trunc_feat(X_3D3, 360)
+    Xo_pt = _pad_or_trunc_feat(X_3D4, 360)
+
+    # -------- 归一化：先把 (P,360) → (1, P,360)，再送给 fp_norm  -------------------
+    X_C_in = Xc_pt[np.newaxis, ...]  # 变为 (1, P, 360)
+    X_H_in = Xh_pt[np.newaxis, ...]
+    X_N_in = Xn_pt[np.newaxis, ...]
+    X_O_in = Xo_pt[np.newaxis, ...]
+
+    # fp_norm 返回 (1, P, 360) 类型的归一化结果
     X_C_norm, X_H_norm, X_N_norm, X_O_norm = fp_norm(
-        X_3D1_batch, X_3D2_batch, X_3D3_batch, X_3D4_batch,
+        X_C_in, X_H_in, X_N_in, X_O_in,
         padding_size,
         SCALER_PATHS
     )
-    # 结果形状均为 (1, padding_size, 360)，先 squeeze 回 (padding_size, 360)
+
+    # squeeze 回 (P, 360)
     X_C_aug = X_C_norm[0]
     X_H_aug = X_H_norm[0]
     X_N_aug = X_N_norm[0]
@@ -538,15 +553,15 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
 
     # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
-    C_d = _squeeze_if_needed(C_d)
+    C_d = _squeeze_if_needed(C_d)  # (P, 341)
     H_d = _squeeze_if_needed(H_d)
     N_d = _squeeze_if_needed(N_d)
     O_d = _squeeze_if_needed(O_d)
 
-    assert C_d.shape == (padding_size, DOS_POINTS), f"C_d.shape={C_d.shape}"
-    assert H_d.shape == (padding_size, DOS_POINTS), f"H_d.shape={H_d.shape}"
-    assert N_d.shape == (padding_size, DOS_POINTS), f"N_d.shape={N_d.shape}"
-    assert O_d.shape == (padding_size, DOS_POINTS), f"O_d.shape={O_d.shape}"
+    assert C_d.shape == (padding_size, DOS_POINTS)
+    assert H_d.shape == (padding_size, DOS_POINTS)
+    assert N_d.shape == (padding_size, DOS_POINTS)
+    assert O_d.shape == (padding_size, DOS_POINTS)
 
     # -------- ground-truth DOS & band edges ------------------------------
     elec_per_atom = {6: 4, 1: 1, 7: 5, 8: 6}
@@ -554,10 +569,10 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         [elec_per_atom[z] for z in struct.atomic_numbers], dtype=np.float32
     ).sum()
     Prop_dos, VB, CB = _read_dos(folder, total_elec)
-    assert Prop_dos.shape == (DOS_POINTS,), f"Prop_dos.shape={Prop_dos.shape}"
+    assert Prop_dos.shape == (DOS_POINTS,)
     VB_CB = np.array([-VB, -CB], dtype=np.float32)
 
-    # -------- return all arrays -----------------------------------------------
+    # -------- 返回所有内容 -----------------------------------------------
     return (
         X_C_aug, X_H_aug, X_N_aug, X_O_aug,   # 四个 (padding_size, 360)
         np.array([total_elec], dtype=np.float32),  # (1,)
