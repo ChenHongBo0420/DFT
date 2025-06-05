@@ -259,12 +259,12 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     """
     Prepare one structure for DOS training/inference, WITHOUT any normalization.
 
-    返回：
-      X_C_aug, X_H_aug, X_N_aug, X_O_aug : 四个 np.ndarray，形状均为 (1, padding_size, 360)
-      total_elec                         : np.ndarray，形状 (1,)
-      C_d, H_d, N_d, O_d                 : 四个 np.ndarray，形状均为 (padding_size, DOS_POINTS)
-      Prop_dos                           : np.ndarray，形状 (DOS_POINTS,)
-      VB_CB                              : np.ndarray，形状 (2,)
+    Returns:
+      X_C_aug, X_H_aug, X_N_aug, X_O_aug : four np.ndarray of shape (1, padding_size, 360)
+      total_elec                         : np.ndarray of shape (1,)
+      C_d, H_d, N_d, O_d                 : four np.ndarray of shape (padding_size, DOS_POINTS)
+      Prop_dos                           : np.ndarray of shape (DOS_POINTS,)
+      VB_CB                              : np.ndarray of shape (2,)
     """
 
     # -------- read structure & element counts ----------------------------
@@ -277,7 +277,7 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     at_elem = [elem_dict[e] for e in ("C", "H", "N", "O")]
 
     # -------- raw fingerprints (4 × (padding_size, feat_fp_raw)) -----------
-    from .fp import fp_atom  # 本地导入，避免循环依赖
+    from .fp import fp_atom  # avoid circular import
 
     dset, basis_mat, *_ = fp_atom(
         struct,
@@ -288,64 +288,73 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         args.num_gamma,
     )
 
-    # chg_data 会返回：
-    #   X_3D1, X_3D2, X_3D3, X_3D4   → 四个 (padding_size, feat_fp_raw) ndarray
-    #   _, _, _, _                   → 占位（grad 信息，不使用）
-    #   C_m_1, H_m_1, N_m_1, O_m_1   → 四个 (padding_size, DOS_POINTS) 的掩码
-    FROM_CHG = chg_data(dset, basis_mat, *at_elem, padding_size)
-    X_3D1, X_3D2, X_3D3, X_3D4, _, _, _, _, C_m_1, H_m_1, N_m_1, O_m_1 = FROM_CHG
+    # chg_data returns:
+    #   X_3D1, X_3D2, X_3D3, X_3D4   → four np.ndarray of shape (padding_size, feat_fp_raw)
+    #   _, _, _, _                   → unused placeholders
+    #   C_m_1, H_m_1, N_m_1, O_m_1   → four np.ndarray of shape (padding_size, DOS_POINTS)
+    from .data_io import chg_data, dos_mask
 
-    # -------- 工具：pad_or_trunc，把 feat_fp_raw 的最后一维变成 360 维 --------
+    X_3D1, X_3D2, X_3D3, X_3D4, _, _, _, _, C_m_1, H_m_1, N_m_1, O_m_1 = chg_data(
+        dset, basis_mat, *at_elem, padding_size
+    )
+
+    # -------- pad_or_trunc utility to force last dim = 360 ----------
     def _pad_or_trunc_feat(arr: np.ndarray, target_dim: int = 360) -> np.ndarray:
         """
-        如果 arr.shape = (padding_size, D)，
-        - 若 D >= target_dim，则截断到 arr[:, :target_dim]
-        - 若 D <  target_dim，则在最后维度补零到 target_dim
-        返回 shape (padding_size, target_dim)
+        Given arr.shape = (padding_size, D):
+        - If D >= target_dim, return arr[:, :target_dim]
+        - If D <  target_dim, pad zeros to reach (padding_size, target_dim)
         """
-        D = arr.shape[-1]
+        n_rows, D = arr.shape
+        assert n_rows == padding_size, f"Expected {padding_size} rows, got {n_rows}"
         if D == target_dim:
             return arr.copy()
         if D > target_dim:
             return arr[:, :target_dim]
         # D < target_dim
         pad_width = target_dim - D
-        pad_block = np.zeros((arr.shape[0], pad_width), dtype=arr.dtype)
+        pad_block = np.zeros((n_rows, pad_width), dtype=arr.dtype)
         return np.concatenate([arr, pad_block], axis=-1)
 
-    # -------- 对每个元素的 raw fingerprint 做 pad_or_trunc（不做任何归一化）-------
+    # -------- process each element’s raw fingerprint ------------------
     Xc_pad = _pad_or_trunc_feat(X_3D1, 360)  # (padding_size, 360)
     Xh_pad = _pad_or_trunc_feat(X_3D2, 360)
     Xn_pad = _pad_or_trunc_feat(X_3D3, 360)
     Xo_pad = _pad_or_trunc_feat(X_3D4, 360)
 
-    # 加一个维度变成 (1, padding_size, 360)，方便后面 DataLoader
-    X_C_aug = Xc_pad[np.newaxis, :, :]  # (1, P, 360)
-    X_H_aug = Xh_pad[np.newaxis, :, :]  # (1, P, 360)
-    X_N_aug = Xn_pad[np.newaxis, :, :]  # (1, P, 360)
-    X_O_aug = Xo_pad[np.newaxis, :, :]  # (1, P, 360)
+    # add batch dimension → (1, padding_size, 360)
+    X_C_aug = Xc_pad[np.newaxis, :, :]
+    X_H_aug = Xh_pad[np.newaxis, :, :]
+    X_N_aug = Xn_pad[np.newaxis, :, :]
+    X_O_aug = Xo_pad[np.newaxis, :, :]
 
     # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
-    # 每个 C_d 等形状都是 (padding_size, DOS_POINTS)
+    # check shapes
+    assert C_d.shape == (padding_size, DOS_POINTS), f"C_d.shape={C_d.shape}"
+    assert H_d.shape == (padding_size, DOS_POINTS), f"H_d.shape={H_d.shape}"
+    assert N_d.shape == (padding_size, DOS_POINTS), f"N_d.shape={N_d.shape}"
+    assert O_d.shape == (padding_size, DOS_POINTS), f"O_d.shape={O_d.shape}"
 
     # -------- ground-truth DOS & band edges ------------------------------
     elec_per_atom = {6: 4, 1: 1, 7: 5, 8: 6}
     total_elec = np.array(
-        [elec_per_atom[z] for z in struct.atomic_numbers],
-        dtype=np.float32
+        [elec_per_atom[z] for z in struct.atomic_numbers], dtype=np.float32
     ).sum()
     Prop_dos, VB, CB = _read_dos(folder, total_elec)
+    # check Prop_dos shape
+    assert Prop_dos.shape == (DOS_POINTS,), f"Prop_dos.shape={Prop_dos.shape}"
     VB_CB = np.array([-VB, -CB], dtype=np.float32)
 
-    # -------- 返回所有内容 -----------------------------------------------
+    # -------- return all outputs -----------------------------------------
     return (
-        X_C_aug, X_H_aug, X_N_aug, X_O_aug,     # 4 × (1, P, 360)
-        np.array([total_elec], dtype=np.float32),  # (1,)
-        C_d, H_d, N_d, O_d,                     # 4 × (P, 341)
-        Prop_dos,                               # (341,)
-        VB_CB                                   # (2,)
+        X_C_aug, X_H_aug, X_N_aug, X_O_aug,     # shapes (1, P, 360)
+        np.array([total_elec], dtype=np.float32),  # shape (1,)
+        C_d, H_d, N_d, O_d,                     # shapes (P, 341)
+        Prop_dos,                               # shape (341,)
+        VB_CB                                   # shape (2,)
     )
+
 
 
 # ---------------------------------------------------------------------------
