@@ -194,8 +194,78 @@ class DOSDataset(Dataset):
 #  Training utilities
 # ---------------------------------------------------------------------------
 
+# def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, ...]:
+#     """Prepare one structure for DOS training / inference."""
+
+#     # -------- read structure & element counts ----------------------------
+#     struct = Poscar.from_file(Path(folder) / "POSCAR").structure
+#     elem_dict = {"C": 0, "H": 0, "N": 0, "O": 0}
+#     for s in struct:
+#         sym = s.specie.symbol
+#         if sym in elem_dict:
+#             elem_dict[sym] += 1
+#     at_elem = [elem_dict[e] for e in ("C", "H", "N", "O")]
+
+#     # -------- raw fingerprints (4 × 3-D) ---------------------------------
+#     from .fp import fp_atom  # local import to avoid circular deps
+
+#     dset, basis_mat, *_ = fp_atom(
+#         struct,
+#         args.grid_spacing,
+#         args.cut_off_rad,
+#         args.widest_gaussian,
+#         args.narrowest_gaussian,
+#         args.num_gamma,
+#     )
+
+#     (
+#         X_3D1, X_3D2, X_3D3, X_3D4,  # fingerprints
+#         _, _, _, _,                  # unused grads
+#         C_m_1, H_m_1, N_m_1, O_m_1,  # masks
+#     ) = chg_data(dset, basis_mat, *at_elem, padding_size)
+
+#     # -------- charge-derived coefficients --------------------------------
+#     coef_paths = [Path(folder) / f"Coef_{e}.npy" for e in ("C", "H", "N", "O")]
+#     if not all(p.exists() for p in coef_paths):
+#         raise FileNotFoundError("Missing Coef_*.npy — run charge→coef export first.")
+#     Coef_C, Coef_H, Coef_N, Coef_O = [np.load(p).astype(np.float32) for p in coef_paths]
+
+#     # -------- concatenate & normalise ------------------------------------
+#     X_C_aug, X_H_aug, X_N_aug, X_O_aug = fp_chg_norm(
+#         X_3D1, X_3D2, X_3D3, X_3D4,        # 4 × (P, feat_fp)
+#         Coef_C, Coef_H, Coef_N, Coef_O,    # 4 × (P, coeff_dim) – same 2-D dims
+#         padding_size,
+#         SCALER_PATHS,
+#     )
+
+#     # -------- masks (DOS-specific) ---------------------------------------
+#     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
+
+#     # -------- ground-truth DOS & band edges ------------------------------
+#     elec_per_atom = {6: 4, 1: 1, 7: 5, 8: 6}
+#     total_elec = np.array([elec_per_atom[z] for z in struct.atomic_numbers], dtype=np.float32).sum()
+#     Prop_dos, VB, CB = _read_dos(folder, total_elec)
+#     VB_CB = np.array([-VB, -CB], dtype=np.float32)
+
+#     # -------- return (each item shape matches fp_chg_norm expectations) ---
+#     return (
+#         X_C_aug, X_H_aug, X_N_aug, X_O_aug,              # 4 × (P, feat_all)
+#         np.array([total_elec], dtype=np.float32),        # (1,)
+#         C_d, H_d, N_d, O_d,                             # 4 × (P, DOS_POINTS)
+#         Prop_dos, VB_CB,
+# )
+
 def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, ...]:
-    """Prepare one structure for DOS training / inference."""
+    """
+    Prepare one structure for DOS training/inference.
+
+    返回：
+      X_C_aug, X_H_aug, X_N_aug, X_O_aug : 四个 np.ndarray，形状均为 (1, padding_size, feat_fp)
+      total_elec                         : np.ndarray，形状 (1,)
+      C_d, H_d, N_d, O_d                 : 四个 np.ndarray，形状均为 (padding_size, DOS_POINTS)
+      Prop_dos                           : np.ndarray，形状 (DOS_POINTS,)
+      VB_CB                              : np.ndarray，形状 (2,)
+    """
 
     # -------- read structure & element counts ----------------------------
     struct = Poscar.from_file(Path(folder) / "POSCAR").structure
@@ -207,7 +277,7 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     at_elem = [elem_dict[e] for e in ("C", "H", "N", "O")]
 
     # -------- raw fingerprints (4 × 3-D) ---------------------------------
-    from .fp import fp_atom  # local import to avoid circular deps
+    from .fp import fp_atom  # 避免循环依赖
 
     dset, basis_mat, *_ = fp_atom(
         struct,
@@ -218,41 +288,44 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         args.num_gamma,
     )
 
+    # chg_data 会返回前四项是 X_3D1…X_3D4（指纹数组），后四项是 C_m_1…O_m_1（用于计算电荷时的掩码），
+    # 这里只需要前四项来作为 dos 的输入指纹。
     (
-        X_3D1, X_3D2, X_3D3, X_3D4,  # fingerprints
-        _, _, _, _,                  # unused grads
-        C_m_1, H_m_1, N_m_1, O_m_1,  # masks
+        X_3D1, X_3D2, X_3D3, X_3D4,  # (padding_size, feat_fp) ×4
+        _, _, _, _,                  # 占位：与电荷相关的 grads，这里不使用
+        C_m_1, H_m_1, N_m_1, O_m_1,  # (padding_size, DOS_POINTS) ×4，用于后续掩码
     ) = chg_data(dset, basis_mat, *at_elem, padding_size)
 
-    # -------- charge-derived coefficients --------------------------------
-    coef_paths = [Path(folder) / f"Coef_{e}.npy" for e in ("C", "H", "N", "O")]
-    if not all(p.exists() for p in coef_paths):
-        raise FileNotFoundError("Missing Coef_*.npy — run charge→coef export first.")
-    Coef_C, Coef_H, Coef_N, Coef_O = [np.load(p).astype(np.float32) for p in coef_paths]
+    # -------- 归一化指纹（仅指纹，不拼系数） -------------------------------
+    from .fp import fp_norm
 
-    # -------- concatenate & normalise ------------------------------------
-    X_C_aug, X_H_aug, X_N_aug, X_O_aug = fp_chg_norm(
-        X_3D1, X_3D2, X_3D3, X_3D4,        # 4 × (P, feat_fp)
-        Coef_C, Coef_H, Coef_N, Coef_O,    # 4 × (P, coeff_dim) – same 2-D dims
+    X_C_aug, X_H_aug, X_N_aug, X_O_aug = fp_norm(
+        X_3D1, X_3D2, X_3D3, X_3D4,  # 4 × (padding_size, feat_fp)
         padding_size,
         SCALER_PATHS,
     )
+    # 此时每个 X_*_aug 的形状均为 (1, padding_size, feat_fp)
 
     # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
+    # 每个 C_d 等的形状是 (padding_size, DOS_POINTS)
 
     # -------- ground-truth DOS & band edges ------------------------------
     elec_per_atom = {6: 4, 1: 1, 7: 5, 8: 6}
-    total_elec = np.array([elec_per_atom[z] for z in struct.atomic_numbers], dtype=np.float32).sum()
+    total_elec = np.array(
+        [elec_per_atom[z] for z in struct.atomic_numbers],
+        dtype=np.float32
+    ).sum()
     Prop_dos, VB, CB = _read_dos(folder, total_elec)
     VB_CB = np.array([-VB, -CB], dtype=np.float32)
 
-    # -------- return (each item shape matches fp_chg_norm expectations) ---
+    # -------- return (each item形状与 fp_norm 调用保持一致) ------------------
     return (
-        X_C_aug, X_H_aug, X_N_aug, X_O_aug,              # 4 × (P, feat_all)
-        np.array([total_elec], dtype=np.float32),        # (1,)
-        C_d, H_d, N_d, O_d,                             # 4 × (P, DOS_POINTS)
-        Prop_dos, VB_CB,
+        X_C_aug, X_H_aug, X_N_aug, X_O_aug,   # 4 × (1, padding_size, feat_fp)
+        np.array([total_elec], dtype=np.float32),  # (1,)
+        C_d, H_d, N_d, O_d,                  # 4 × (padding_size, DOS_POINTS)
+        Prop_dos,                            # (DOS_POINTS,)
+        VB_CB                                # (2,)
     )
 
 # ---------------------------------------------------------------------------
