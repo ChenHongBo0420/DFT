@@ -80,44 +80,57 @@ class _DOSSubNetCNO(nn.Module):
     def __init__(self, input_dim: int):
         super().__init__()
         hidden = 600
+
+        # 定义一个不包含 Dropout 的 MLP，但保留 BatchNorm
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden),
-            nn.BatchNorm1d(hidden),  # 对隐藏层特征做批归一化
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Linear(input_dim, hidden),   # index 0
+            nn.BatchNorm1d(hidden),         # index 1
+            nn.ReLU(),                      # index 2
 
-            nn.Linear(hidden, hidden),
-            nn.BatchNorm1d(hidden),
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Linear(hidden, hidden),      # index 3
+            nn.BatchNorm1d(hidden),         # index 4
+            nn.ReLU(),                      # index 5
 
-            nn.Linear(hidden, hidden),
-            nn.BatchNorm1d(hidden),
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Linear(hidden, hidden),      # index 6
+            nn.BatchNorm1d(hidden),         # index 7
+            nn.ReLU(),                      # index 8
 
-            nn.Linear(hidden, hidden),
-            nn.BatchNorm1d(hidden),
-            nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Linear(hidden, hidden),      # index 9
+            nn.BatchNorm1d(hidden),         # index 10
+            nn.ReLU(),                      # index 11
 
-            nn.Linear(hidden, DOS_POINTS)  # 输出在 341 个能量点上的原子级 DOS 预测
+            nn.Linear(hidden, DOS_POINTS)   # index 12
         )
+
         self.conv = nn.Conv1d(1, 3, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         参数:
-          x: torch.Tensor, 形状 (B*P, input_dim)  
-             其中 B 是 batch size, P 是 padding_size, input_dim=701
+          x: torch.Tensor, 形状 (B*P, input_dim)
+             其中 B 是 batch size, P 是 padding_size, input_dim = 701
 
         返回:
           torch.Tensor, 形状 (B*P, DOS_POINTS)，即每个原子在 341 个能量点上的 DOS 预测
         """
-        # 先让 MLP 输出 (B*P, DOS_POINTS)，再 reshape 为 (B*P, 1, DOS_POINTS)
-        h = self.mlp(x).view(-1, 1, DOS_POINTS)
-        # 用 1D 卷积在邻近能量点做平滑，然后对通道求平均
-        h = self.conv(h).mean(dim=1)  # → (B*P, DOS_POINTS)
+        # 1) 先做第一层 Linear
+        h0 = self.mlp[0](x)              # (B*P, hidden)
+        # 2) 再做第一层 BatchNorm
+        h1 = self.mlp[1](h0)             # (B*P, hidden)
+
+        # 调试打印
+        print("Linear 输出 mean/std =", h0.mean().item(), h0.std().item())
+        print("BatchNorm 输出 mean/std =", h1.mean().item(), h1.std().item())
+
+        # 3) 然后把结果依次传给剩余层
+        h = h1
+        for layer in list(self.mlp.children())[2:]:  # index 从 2 开始到末尾
+            h = layer(h)  # 依次经过 ReLU, Linear, BatchNorm, ReLU, ... 最终到 Linear(hidden→341)
+
+        # 4) 将 (B*P, 341) reshape 为 (B*P, 1, 341)，再做 Conv1d 并对通道求平均
+        h = h.view(-1, 1, DOS_POINTS)   # (B*P, 1, 341)
+        h = self.conv(h).mean(dim=1)     # → (B*P, 341)
+
         return h
         
 class _DOSSubNetH(_DOSSubNetCNO):
