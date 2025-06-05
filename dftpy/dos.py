@@ -81,22 +81,22 @@ class _DOSSubNetCNO(nn.Module):
         super().__init__()
         hidden = 600
 
-        # 定义一个不包含 Dropout 的 MLP，但保留 BatchNorm
+        # 定义一个不包含 Dropout 的 MLP，使用 LayerNorm 代替 BatchNorm
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden),   # index 0
-            nn.BatchNorm1d(hidden),         # index 1
+            nn.LayerNorm(hidden),           # index 1
             nn.ReLU(),                      # index 2
 
             nn.Linear(hidden, hidden),      # index 3
-            nn.BatchNorm1d(hidden),         # index 4
+            nn.LayerNorm(hidden),           # index 4
             nn.ReLU(),                      # index 5
 
             nn.Linear(hidden, hidden),      # index 6
-            nn.BatchNorm1d(hidden),         # index 7
+            nn.LayerNorm(hidden),           # index 7
             nn.ReLU(),                      # index 8
 
             nn.Linear(hidden, hidden),      # index 9
-            nn.BatchNorm1d(hidden),         # index 10
+            nn.LayerNorm(hidden),           # index 10
             nn.ReLU(),                      # index 11
 
             nn.Linear(hidden, DOS_POINTS)   # index 12
@@ -115,17 +115,17 @@ class _DOSSubNetCNO(nn.Module):
         """
         # 1) 先做第一层 Linear
         h0 = self.mlp[0](x)              # (B*P, hidden)
-        # 2) 再做第一层 BatchNorm
+        # 2) 再做第一层 LayerNorm
         h1 = self.mlp[1](h0)             # (B*P, hidden)
 
         # 调试打印
         print("Linear 输出 mean/std =", h0.mean().item(), h0.std().item())
-        print("BatchNorm 输出 mean/std =", h1.mean().item(), h1.std().item())
+        print("LayerNorm 输出 mean/std =", h1.mean().item(), h1.std().item())
 
         # 3) 然后把结果依次传给剩余层
         h = h1
         for layer in list(self.mlp.children())[2:]:  # index 从 2 开始到末尾
-            h = layer(h)  # 依次经过 ReLU, Linear, BatchNorm, ReLU, ... 最终到 Linear(hidden→341)
+            h = layer(h)  # 依次经过 ReLU, Linear, LayerNorm, ReLU, ... 最终到 Linear(hidden→341)
 
         # 4) 将 (B*P, 341) reshape 为 (B*P, 1, 341)，再做 Conv1d 并对通道求平均
         h = h.view(-1, 1, DOS_POINTS)   # (B*P, 1, 341)
