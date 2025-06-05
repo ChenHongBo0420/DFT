@@ -51,25 +51,26 @@ def _read_dos(folder: str, total_elec: float) -> Tuple[np.ndarray, float, float]
 # ---------------------------------------------------------------------------
 #  Single‑atom subnetworks
 # ---------------------------------------------------------------------------
+
 class _DOSSubNetCNO(nn.Module):
     def __init__(self, input_dim: int):
         super().__init__()
         hidden = 600
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(hidden, hidden), nn.ReLU(), nn.Dropout(0.1),
+            nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
+            nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
+            nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
             nn.Linear(hidden, DOS_POINTS),
         )
         self.conv = nn.Conv1d(1, 3, kernel_size=3, padding=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:  # (B*P, feat)
-        h = self.mlp(x).view(-1, 1, DOS_POINTS)          # (B*P,1,341)
-        h = self.conv(h).mean(dim=1)                     # (B*P,341)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B*P, input_dim)
+        h = self.mlp(x).view(-1, 1, DOS_POINTS)  # → (B*P, 1, 341)
+        h = self.conv(h).mean(dim=1)             # → (B*P, 341)
         return h
-
-
+        
 class _DOSSubNetH(_DOSSubNetCNO):
     pass  # identical architecture; only input_dim differs when instantiated
 
@@ -82,17 +83,24 @@ class DOSModel(nn.Module):
         super().__init__()
         self.padding_size = padding_size
 
-        self.netC = _DOSSubNetCNO(360 + 340)
-        self.netH = _DOSSubNetH(360 + 208)
-        self.netN = _DOSSubNetCNO(360 + 340)
-        self.netO = _DOSSubNetCNO(360 + 340)
+        # 每个子网的输入维度 = 360（fingerprint） + DOS_POINTS（mask）
+        in_dim_C = 360 + DOS_POINTS  # C: 701
+        in_dim_H = 360 + DOS_POINTS  # H: 701
+        in_dim_N = 360 + DOS_POINTS  # N: 701
+        in_dim_O = 360 + DOS_POINTS  # O: 701
 
-        # global head predicting [‑VB, ‑CB]
+        self.netC = _DOSSubNetCNO(in_dim_C)
+        self.netH = _DOSSubNetH(in_dim_H)
+        self.netN = _DOSSubNetCNO(in_dim_N)
+        self.netO = _DOSSubNetCNO(in_dim_O)
+
+        # 全局 head 用于预测 [-VB, -CB]
         self.band_head = nn.Sequential(
-            nn.Linear(DOS_POINTS, 100), nn.ReLU(), nn.Linear(100, 100), nn.ReLU(), nn.Linear(100, 2)
+            nn.Linear(DOS_POINTS, 100), nn.ReLU(),
+            nn.Linear(100, 100),       nn.ReLU(),
+            nn.Linear(100, 2)
         )
 
-    # ---------------------------------------------------------------------
     def forward(
         self,
         X_C: torch.Tensor,
@@ -105,34 +113,43 @@ class DOSModel(nn.Module):
         N_m: torch.Tensor,
         O_m: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass.
-        X_*         : (B,P,feat)
-        total_elec  : (B,1)
-        *_m (masks) : (B,P,DOS_POINTS)
-        Returns      norm_dos (B,DOS_POINTS), vbcb (B,2)
+        """
+        X_*       : (B, P, 360)         （360 维原子指纹）
+        *_m       : (B, P, DOS_POINTS)  （341 维掩码）
+        total_elec: (B, 1)
+        返回     norm_dos (B, 341), vbcb (B, 2)
         """
         B, P, _ = X_C.shape
 
         def _flatten(t: torch.Tensor) -> torch.Tensor:
+            # 把 (B, P, feat) → (B*P, feat)
             return t.view(B * P, -1)
 
-        flatC = self.netC(_flatten(X_C)).view(B, P, DOS_POINTS)
-        flatH = self.netH(_flatten(X_H)).view(B, P, DOS_POINTS)
-        flatN = self.netN(_flatten(X_N)).view(B, P, DOS_POINTS)
-        flatO = self.netO(_flatten(X_O)).view(B, P, DOS_POINTS)
+        # 先把 fingerprint 和 mask 在最后一维拼接 → (B, P, 701)
+        catC = torch.cat([X_C, C_m], dim=-1)  # (B, P, 701)
+        catH = torch.cat([X_H, H_m], dim=-1)
+        catN = torch.cat([X_N, N_m], dim=-1)
+        catO = torch.cat([X_O, O_m], dim=-1)
 
-        # apply masks & sum over atoms ------------------------------------
+        # 再 flatten, 送入子网
+        flatC = self.netC(_flatten(catC)).view(B, P, DOS_POINTS)  # (B, P, 341)
+        flatH = self.netH(_flatten(catH)).view(B, P, DOS_POINTS)
+        flatN = self.netN(_flatten(catN)).view(B, P, DOS_POINTS)
+        flatO = self.netO(_flatten(catO)).view(B, P, DOS_POINTS)
+
+        # 对每个原子在每个能量点的预测乘以对应掩码，再 sum over atoms
         total_dos = (
-            (flatC * C_m).sum(dim=1)
-            + (flatH * H_m).sum(dim=1)
-            + (flatN * N_m).sum(dim=1)
-            + (flatO * O_m).sum(dim=1)
-        )  # (B, DOS_POINTS)
+            (flatC * C_m).sum(dim=1) +
+            (flatH * H_m).sum(dim=1) +
+            (flatN * N_m).sum(dim=1) +
+            (flatO * O_m).sum(dim=1)
+        )  # (B, 341)
 
-        norm_dos = total_dos / total_elec  # broadcasting (B,1)
-        vbcb = self.band_head(norm_dos)    # (B,2)
+        # 归一化，预测带边
+        norm_dos = total_dos / total_elec  # (B, 341) / (B, 1)
+        vbcb = self.band_head(norm_dos)    # (B, 2)
+
         return norm_dos, vbcb
-
 
 # ---------------------------------------------------------------------------
 #  Loss function
