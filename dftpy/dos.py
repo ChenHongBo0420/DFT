@@ -257,10 +257,10 @@ class DOSDataset(Dataset):
 
 def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, ...]:
     """
-    Prepare one structure for DOS training/inference.
+    Prepare one structure for DOS training/inference, WITHOUT any normalization.
 
     返回：
-      X_C_aug, X_H_aug, X_N_aug, X_O_aug : 四个 np.ndarray，形状均为 (1, padding_size, feat_fp)
+      X_C_aug, X_H_aug, X_N_aug, X_O_aug : 四个 np.ndarray，形状均为 (1, padding_size, 360)
       total_elec                         : np.ndarray，形状 (1,)
       C_d, H_d, N_d, O_d                 : 四个 np.ndarray，形状均为 (padding_size, DOS_POINTS)
       Prop_dos                           : np.ndarray，形状 (DOS_POINTS,)
@@ -276,8 +276,8 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
             elem_dict[sym] += 1
     at_elem = [elem_dict[e] for e in ("C", "H", "N", "O")]
 
-    # -------- raw fingerprints (4 × 3-D) ---------------------------------
-    from .fp import fp_atom  # 避免循环依赖
+    # -------- raw fingerprints (4 × (padding_size, feat_fp_raw)) -----------
+    from .fp import fp_atom  # 本地导入，避免循环依赖
 
     dset, basis_mat, *_ = fp_atom(
         struct,
@@ -288,27 +288,46 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         args.num_gamma,
     )
 
-    # chg_data 会返回前四项是 X_3D1…X_3D4（指纹数组），后四项是 C_m_1…O_m_1（用于计算电荷时的掩码），
-    # 这里只需要前四项来作为 dos 的输入指纹。
-    (
-        X_3D1, X_3D2, X_3D3, X_3D4,  # (padding_size, feat_fp) ×4
-        _, _, _, _,                  # 占位：与电荷相关的 grads，这里不使用
-        C_m_1, H_m_1, N_m_1, O_m_1,  # (padding_size, DOS_POINTS) ×4，用于后续掩码
-    ) = chg_data(dset, basis_mat, *at_elem, padding_size)
+    # chg_data 会返回：
+    #   X_3D1, X_3D2, X_3D3, X_3D4   → 四个 (padding_size, feat_fp_raw) ndarray
+    #   _, _, _, _                   → 占位（grad 信息，不使用）
+    #   C_m_1, H_m_1, N_m_1, O_m_1   → 四个 (padding_size, DOS_POINTS) 的掩码
+    FROM_CHG = chg_data(dset, basis_mat, *at_elem, padding_size)
+    X_3D1, X_3D2, X_3D3, X_3D4, _, _, _, _, C_m_1, H_m_1, N_m_1, O_m_1 = FROM_CHG
 
-    # -------- 归一化指纹（仅指纹，不拼系数） -------------------------------
-    from .fp import fp_norm
+    # -------- 工具：pad_or_trunc，把 feat_fp_raw 的最后一维变成 360 维 --------
+    def _pad_or_trunc_feat(arr: np.ndarray, target_dim: int = 360) -> np.ndarray:
+        """
+        如果 arr.shape = (padding_size, D)，
+        - 若 D >= target_dim，则截断到 arr[:, :target_dim]
+        - 若 D <  target_dim，则在最后维度补零到 target_dim
+        返回 shape (padding_size, target_dim)
+        """
+        D = arr.shape[-1]
+        if D == target_dim:
+            return arr.copy()
+        if D > target_dim:
+            return arr[:, :target_dim]
+        # D < target_dim
+        pad_width = target_dim - D
+        pad_block = np.zeros((arr.shape[0], pad_width), dtype=arr.dtype)
+        return np.concatenate([arr, pad_block], axis=-1)
 
-    X_C_aug, X_H_aug, X_N_aug, X_O_aug = fp_norm(
-        X_3D1, X_3D2, X_3D3, X_3D4,  # 4 × (padding_size, feat_fp)
-        padding_size,
-        SCALER_PATHS,
-    )
-    # 此时每个 X_*_aug 的形状均为 (1, padding_size, feat_fp)
+    # -------- 对每个元素的 raw fingerprint 做 pad_or_trunc（不做任何归一化）-------
+    Xc_pad = _pad_or_trunc_feat(X_3D1, 360)  # (padding_size, 360)
+    Xh_pad = _pad_or_trunc_feat(X_3D2, 360)
+    Xn_pad = _pad_or_trunc_feat(X_3D3, 360)
+    Xo_pad = _pad_or_trunc_feat(X_3D4, 360)
+
+    # 加一个维度变成 (1, padding_size, 360)，方便后面 DataLoader
+    X_C_aug = Xc_pad[np.newaxis, :, :]  # (1, P, 360)
+    X_H_aug = Xh_pad[np.newaxis, :, :]  # (1, P, 360)
+    X_N_aug = Xn_pad[np.newaxis, :, :]  # (1, P, 360)
+    X_O_aug = Xo_pad[np.newaxis, :, :]  # (1, P, 360)
 
     # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
-    # 每个 C_d 等的形状是 (padding_size, DOS_POINTS)
+    # 每个 C_d 等形状都是 (padding_size, DOS_POINTS)
 
     # -------- ground-truth DOS & band edges ------------------------------
     elec_per_atom = {6: 4, 1: 1, 7: 5, 8: 6}
@@ -319,14 +338,15 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     Prop_dos, VB, CB = _read_dos(folder, total_elec)
     VB_CB = np.array([-VB, -CB], dtype=np.float32)
 
-    # -------- return (each item形状与 fp_norm 调用保持一致) ------------------
+    # -------- 返回所有内容 -----------------------------------------------
     return (
-        X_C_aug, X_H_aug, X_N_aug, X_O_aug,   # 4 × (1, padding_size, feat_fp)
+        X_C_aug, X_H_aug, X_N_aug, X_O_aug,     # 4 × (1, P, 360)
         np.array([total_elec], dtype=np.float32),  # (1,)
-        C_d, H_d, N_d, O_d,                  # 4 × (padding_size, DOS_POINTS)
-        Prop_dos,                            # (DOS_POINTS,)
-        VB_CB                                # (2,)
+        C_d, H_d, N_d, O_d,                     # 4 × (P, 341)
+        Prop_dos,                               # (341,)
+        VB_CB                                   # (2,)
     )
+
 
 # ---------------------------------------------------------------------------
 #  Public helpers (train / load / infer)
