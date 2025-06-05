@@ -495,9 +495,9 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     )
 
     # chg_data 返回：
-    #   X_3D1..X_3D4  → 可能形状 (1, padding_size, feat_raw) 或 (padding_size, feat_raw)
+    #   X_3D1..X_3D4  → 可能形状 (padding_size, feat_raw) 或 (1, padding_size, feat_raw)
     #   _, _, _, _    → 占位（grad 信息，不使用）
-    #   C_m_1..O_m_1  → 可能形状 (1, padding_size, DOS_POINTS) 或 (padding_size, DOS_POINTS)
+    #   C_m_1..O_m_1  → 可能形状 (padding_size, DOS_POINTS) 或 (1, padding_size, DOS_POINTS)
     X_3D1, X_3D2, X_3D3, X_3D4, _, _, _, _, C_m_1, H_m_1, N_m_1, O_m_1 = chg_data(
         dset, basis_mat, *at_elem, padding_size
     )
@@ -519,12 +519,22 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     O_m_1 = _squeeze_if_needed(O_m_1)
 
     # -------- normalize fingerprints to 360 dims via MaxAbsScaler -----------
-    X_C_aug, X_H_aug, X_N_aug, X_O_aug = fp_norm(
-        X_3D1, X_3D2, X_3D3, X_3D4,
+    # fp_norm expects inputs of shape (n_samples, P, feat_raw), so add a leading dim=1
+    X_3D1_batch = X_3D1[np.newaxis, ...]  # → (1, P, feat_raw)
+    X_3D2_batch = X_3D2[np.newaxis, ...]
+    X_3D3_batch = X_3D3[np.newaxis, ...]
+    X_3D4_batch = X_3D4[np.newaxis, ...]
+
+    X_C_norm, X_H_norm, X_N_norm, X_O_norm = fp_norm(
+        X_3D1_batch, X_3D2_batch, X_3D3_batch, X_3D4_batch,
         padding_size,
         SCALER_PATHS
     )
-    # 结果形状均为 (padding_size, 360)
+    # 结果形状均为 (1, padding_size, 360)，先 squeeze 回 (padding_size, 360)
+    X_C_aug = X_C_norm[0]
+    X_H_aug = X_H_norm[0]
+    X_N_aug = X_N_norm[0]
+    X_O_aug = X_O_norm[0]
 
     # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
