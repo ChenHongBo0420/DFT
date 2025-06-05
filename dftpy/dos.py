@@ -260,7 +260,7 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     Prepare one structure for DOS training/inference, WITHOUT any normalization.
 
     Returns:
-      X_C_aug, X_H_aug, X_N_aug, X_O_aug : 四个 np.ndarray，形状均为 (1, padding_size, 360)
+      X_C_aug, X_H_aug, X_N_aug, X_O_aug : 四个 np.ndarray，形状均为 (padding_size, 360)
       total_elec                         : np.ndarray，形状 (1,)
       C_d, H_d, N_d, O_d                 : 四个 np.ndarray，形状均为 (padding_size, DOS_POINTS)
       Prop_dos                           : np.ndarray，形状 (DOS_POINTS,)
@@ -340,16 +340,16 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     Xn_pad = _pad_or_trunc_feat(X_3D3, 360)
     Xo_pad = _pad_or_trunc_feat(X_3D4, 360)
 
-    # 加 batch 维度 → (1, padding_size, 360)
-    X_C_aug = Xc_pad[np.newaxis, :, :]
-    X_H_aug = Xh_pad[np.newaxis, :, :]
-    X_N_aug = Xn_pad[np.newaxis, :, :]
-    X_O_aug = Xo_pad[np.newaxis, :, :]
+    # 此时 X_*_pad 已经是 (padding_size, 360)，不再添加 batch 维度
+    X_C_aug = Xc_pad
+    X_H_aug = Xh_pad
+    X_N_aug = Xn_pad
+    X_O_aug = Xo_pad
 
     # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
-    # dos_mask 返回的可能是 (1, P, 341)，需要再 squeeze 一次
-    C_d = _squeeze_if_needed(C_d)  # 现在应是 (P, 341)
+    # dos_mask 返回可能是 (1, P, 341)，需要再 squeeze 一次
+    C_d = _squeeze_if_needed(C_d)  # 现在应为 (P, 341)
     H_d = _squeeze_if_needed(H_d)
     N_d = _squeeze_if_needed(N_d)
     O_d = _squeeze_if_needed(O_d)
@@ -373,9 +373,9 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
 
     # -------- 返回所有内容 -----------------------------------------------
     return (
-        X_C_aug, X_H_aug, X_N_aug, X_O_aug,          # 四个 np.ndarray, 形状 (1, P, 360)
+        X_C_aug, X_H_aug, X_N_aug, X_O_aug,          # 四个 np.ndarray, 形状 (padding_size, 360)
         np.array([total_elec], dtype=np.float32),    # (1,)
-        C_d, H_d, N_d, O_d,                          # 四个 np.ndarray, 形状 (P, 341)
+        C_d, H_d, N_d, O_d,                          # 四个 np.ndarray, 形状 (padding_size, 341)
         Prop_dos,                                    # (341,)
         VB_CB                                        # (2,)
     )
