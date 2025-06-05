@@ -52,23 +52,72 @@ def _read_dos(folder: str, total_elec: float) -> Tuple[np.ndarray, float, float]
 #  Single‑atom subnetworks
 # ---------------------------------------------------------------------------
 
+# class _DOSSubNetCNO(nn.Module):
+#     def __init__(self, input_dim: int):
+#         super().__init__()
+#         hidden = 600
+#         self.mlp = nn.Sequential(
+#             nn.Linear(input_dim, hidden), nn.ReLU(), nn.Dropout(0.1),
+#             nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
+#             nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
+#             nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
+#             nn.Linear(hidden, DOS_POINTS),
+#         )
+#         self.conv = nn.Conv1d(1, 3, kernel_size=3, padding=1)
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         # x: (B*P, input_dim)
+#         h = self.mlp(x).view(-1, 1, DOS_POINTS)  # → (B*P, 1, 341)
+#         h = self.conv(h).mean(dim=1)             # → (B*P, 341)
+#         return h
+
 class _DOSSubNetCNO(nn.Module):
+    """
+    Single-atom subnetwork for C, N, and O.
+    输入维度应为 (360 + DOS_POINTS)，即指纹 360 维 + 掩码 341 维 = 701 维。
+    """
+
     def __init__(self, input_dim: int):
         super().__init__()
         hidden = 600
         self.mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden), nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(hidden, hidden),   nn.ReLU(), nn.Dropout(0.1),
-            nn.Linear(hidden, DOS_POINTS),
+            nn.Linear(input_dim, hidden),
+            nn.BatchNorm1d(hidden),  # 对隐藏层特征做批归一化
+            nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.Linear(hidden, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.Linear(hidden, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.Linear(hidden, hidden),
+            nn.BatchNorm1d(hidden),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+
+            nn.Linear(hidden, DOS_POINTS)  # 输出在 341 个能量点上的原子级 DOS 预测
         )
         self.conv = nn.Conv1d(1, 3, kernel_size=3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B*P, input_dim)
-        h = self.mlp(x).view(-1, 1, DOS_POINTS)  # → (B*P, 1, 341)
-        h = self.conv(h).mean(dim=1)             # → (B*P, 341)
+        """
+        参数:
+          x: torch.Tensor, 形状 (B*P, input_dim)  
+             其中 B 是 batch size, P 是 padding_size, input_dim=701
+
+        返回:
+          torch.Tensor, 形状 (B*P, DOS_POINTS)，即每个原子在 341 个能量点上的 DOS 预测
+        """
+        # 先让 MLP 输出 (B*P, DOS_POINTS)，再 reshape 为 (B*P, 1, DOS_POINTS)
+        h = self.mlp(x).view(-1, 1, DOS_POINTS)
+        # 用 1D 卷积在邻近能量点做平滑，然后对通道求平均
+        h = self.conv(h).mean(dim=1)  # → (B*P, DOS_POINTS)
         return h
         
 class _DOSSubNetH(_DOSSubNetCNO):
