@@ -277,7 +277,8 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
     at_elem = [elem_dict[e] for e in ("C", "H", "N", "O")]
 
     # -------- raw fingerprints (4 × (padding_size, feat_fp_raw)) -----------
-    from .fp import fp_atom  # avoid circular import
+    from .fp import fp_atom  # 本地导入，避免循环依赖
+    from .data_io import chg_data, dos_mask
 
     dset, basis_mat, *_ = fp_atom(
         struct,
@@ -288,41 +289,47 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         args.num_gamma,
     )
 
-    # chg_data returns:
-    #   X_3D1, X_3D2, X_3D3, X_3D4   → four np.ndarray of shape (padding_size, feat_fp_raw)
-    #   _, _, _, _                   → unused placeholders
-    #   C_m_1, H_m_1, N_m_1, O_m_1   → four np.ndarray of shape (padding_size, DOS_POINTS)
-    from .data_io import chg_data, dos_mask
-
+    # chg_data 返回：
+    #   X_3D1, X_3D2, X_3D3, X_3D4   → 四个 ndarray，可能形如 (1, P, feat_raw)
+    #   _, _, _, _                   → 占位（grad 信息，不使用）
+    #   C_m_1, H_m_1, N_m_1, O_m_1   → 四个 ndarray，形如 (P, DOS_POINTS)
     X_3D1, X_3D2, X_3D3, X_3D4, _, _, _, _, C_m_1, H_m_1, N_m_1, O_m_1 = chg_data(
         dset, basis_mat, *at_elem, padding_size
     )
 
-    # -------- pad_or_trunc utility to force last dim = 360 ----------
-    def _pad_or_trunc_feat(arr: np.ndarray, target_dim: int = 360) -> np.ndarray:
+    # -------- 工具：先把 (1, P, D) squeeze 为 (P, D)，再 pad_or_trunc 到 (P, 360) --------
+    def _squeeze_and_pad(arr: np.ndarray, target_dim: int = 360) -> np.ndarray:
         """
-        Given arr.shape = (padding_size, D):
-        - If D >= target_dim, return arr[:, :target_dim]
-        - If D <  target_dim, pad zeros to reach (padding_size, target_dim)
+        如果 arr.shape = (1, P, D) 或 (P, D):
+        1) 先 squeeze 到 (P, D)
+        2) 若 D >= target_dim，则截断到 arr[:, :target_dim]
+           若 D <  target_dim，则在最后维度补零到 target_dim
+        返回 shape (P, target_dim)
         """
-        n_rows, D = arr.shape
-        assert n_rows == padding_size, f"Expected {padding_size} rows, got {n_rows}"
+        # 1) squeeze
+        if arr.ndim == 3 and arr.shape[0] == 1:
+            arr2 = arr[0]  # shape (P, D)
+        else:
+            arr2 = arr     # 假定为 (P, D)
+
+        P, D = arr2.shape
+        assert P == padding_size, f"Expected {padding_size} rows, got {P}"
         if D == target_dim:
-            return arr.copy()
+            return arr2.copy()
         if D > target_dim:
-            return arr[:, :target_dim]
-        # D < target_dim
+            return arr2[:, :target_dim]
+        # D < target_dim: pad zeros
         pad_width = target_dim - D
-        pad_block = np.zeros((n_rows, pad_width), dtype=arr.dtype)
-        return np.concatenate([arr, pad_block], axis=-1)
+        pad_block = np.zeros((P, pad_width), dtype=arr2.dtype)
+        return np.concatenate([arr2, pad_block], axis=-1)
 
-    # -------- process each element’s raw fingerprint ------------------
-    Xc_pad = _pad_or_trunc_feat(X_3D1, 360)  # (padding_size, 360)
-    Xh_pad = _pad_or_trunc_feat(X_3D2, 360)
-    Xn_pad = _pad_or_trunc_feat(X_3D3, 360)
-    Xo_pad = _pad_or_trunc_feat(X_3D4, 360)
+    # -------- 对每个元素的 raw fingerprint 做 squeeze + pad_or_trunc -------
+    Xc_pad = _squeeze_and_pad(X_3D1, 360)  # (padding_size, 360)
+    Xh_pad = _squeeze_and_pad(X_3D2, 360)
+    Xn_pad = _squeeze_and_pad(X_3D3, 360)
+    Xo_pad = _squeeze_and_pad(X_3D4, 360)
 
-    # add batch dimension → (1, padding_size, 360)
+    # 加一个 batch 维度 → (1, padding_size, 360)
     X_C_aug = Xc_pad[np.newaxis, :, :]
     X_H_aug = Xh_pad[np.newaxis, :, :]
     X_N_aug = Xn_pad[np.newaxis, :, :]
@@ -330,7 +337,7 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
 
     # -------- masks (DOS-specific) ---------------------------------------
     C_d, H_d, N_d, O_d = dos_mask(C_m_1, H_m_1, N_m_1, O_m_1, padding_size)
-    # check shapes
+    # 检查 shape 是否一致
     assert C_d.shape == (padding_size, DOS_POINTS), f"C_d.shape={C_d.shape}"
     assert H_d.shape == (padding_size, DOS_POINTS), f"H_d.shape={H_d.shape}"
     assert N_d.shape == (padding_size, DOS_POINTS), f"N_d.shape={N_d.shape}"
@@ -342,17 +349,17 @@ def _prepare_single(folder: str, padding_size: int, args) -> Tuple[np.ndarray, .
         [elec_per_atom[z] for z in struct.atomic_numbers], dtype=np.float32
     ).sum()
     Prop_dos, VB, CB = _read_dos(folder, total_elec)
-    # check Prop_dos shape
+    # 检查 Prop_dos 维度
     assert Prop_dos.shape == (DOS_POINTS,), f"Prop_dos.shape={Prop_dos.shape}"
     VB_CB = np.array([-VB, -CB], dtype=np.float32)
 
     # -------- return all outputs -----------------------------------------
     return (
-        X_C_aug, X_H_aug, X_N_aug, X_O_aug,     # shapes (1, P, 360)
-        np.array([total_elec], dtype=np.float32),  # shape (1,)
-        C_d, H_d, N_d, O_d,                     # shapes (P, 341)
-        Prop_dos,                               # shape (341,)
-        VB_CB                                   # shape (2,)
+        X_C_aug, X_H_aug, X_N_aug, X_O_aug,     # 四个 np.ndarray，形状 (1, P, 360)
+        np.array([total_elec], dtype=np.float32),  # (1,)
+        C_d, H_d, N_d, O_d,                     # 四个 np.ndarray，形状 (P, 341)
+        Prop_dos,                               # (341,)
+        VB_CB                                   # (2,)
     )
 
 
