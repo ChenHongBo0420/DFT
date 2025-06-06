@@ -119,8 +119,8 @@ class _DOSSubNetCNO(nn.Module):
         h1 = self.mlp[1](h0)             # (B*P, hidden)
 
         # 调试打印
-        print("Linear 输出 mean/std =", h0.mean().item(), h0.std().item())
-        print("LayerNorm 输出 mean/std =", h1.mean().item(), h1.std().item())
+        # print("Linear 输出 mean/std =", h0.mean().item(), h0.std().item())
+        # print("LayerNorm 输出 mean/std =", h1.mean().item(), h1.std().item())
 
         # 3) 然后把结果依次传给剩余层
         h = h1
