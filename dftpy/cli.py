@@ -1,332 +1,184 @@
-# dftpy/cli.py
+"""Command-line entry points for the original ML-DFT models."""
+
 import argparse
+from contextlib import contextmanager
+import json
+import math
 import os
 from pathlib import Path
 
-import numpy as np
-import torch
-from pymatgen.io.vasp.inputs import Poscar  # only used for type hints / IDE help
-
-from .utils import silence_deprecation_warnings, read_poscar
-from .data_io import (
-    get_max_atom_count,
-    read_file_list,
-    save_charges,
-    save_dos,
-    save_energy,
-)
-from .chg import infer_charges, load_pretrained_chg_model, train_chg_model
-from .dos import infer_dos, load_pretrained_dos_model, train_dos_model
-from .energy import (
-    infer_energy,
-    load_pretrained_energy_model,
-    train_energy_model,
-)
-
-# -----------------------------------------------------------------------------
-# NEW: robust helper to locate POSCAR file no matter what path we receive
-# -----------------------------------------------------------------------------
-
-def _find_poscar(folder: str | Path) -> tuple[Path, Path]:
-    """Return (poscar_path, base_dir).
-
-    The CSV entry might be:
-    1. structure root – e.g. …/R1000003
-    2. “POSCAR” directory – e.g. …/R1000003/POSCAR
-    3. POSCAR file – e.g. …/R1000003/POSCAR or …/R1000003/POSCAR/POSCAR
-
-    We scan in the following order and stop at the first file hit:
-      • <folder>               (if file and name == POSCAR)
-      • <folder>/POSCAR        (file)
-      • <folder>/POSCAR/POSCAR (file)
-
-    base_dir is chosen as the *directory where we will store Coef_*.npy*.
-    Here we keep it simple: use the **directory that directly contains
-    the POSCAR file** – this works for all training / inference paths.
-    """
-
-    f = Path(folder)
-    candidates: list[Path] = []
-
-    # Case 1: user passed the POSCAR file directly
-    if f.is_file() and f.name.upper() == "POSCAR":
-        candidates.append(f)
-    else:
-        # Case 2 & 3: structure dir or POSCAR dir
-        candidates.extend([
-            f / "POSCAR",
-            f / "POSCAR" / "POSCAR",
-        ])
-
-    for c in candidates:
-        if c.is_file():
-            return c, c.parent  # poscar_path, base_dir
-
-    raise FileNotFoundError(f"在路径 {folder} 及其下级目录中未找到 POSCAR 文件")
+from .paths import read_file_list, require_files, structure_folder
+from .config import FINGERPRINT_DEFAULTS
 
 
-# -----------------------------------------------------------------------------
-# Patched: save charge‑coefficients as Coef_*.npy (C/H/N/O) per structure
-# -----------------------------------------------------------------------------
-
-def _save_coef_npy_for_folder(
-        folder: str,
-        chg_model: torch.nn.Module,
-        padding_size: int,
-        args):
-    """对单个 structure 生成 Coef_C/H/N/O.npy。"""
-
-    # 1️⃣ 找到真实 POSCAR 文件
-    poscar_path, base_dir = _find_poscar(folder)
-
-    # 2️⃣ 推理得到 “每原子系数矩阵”
-    all_coef = infer_charges(str(poscar_path), chg_model, padding_size, args)
-    if isinstance(all_coef, torch.Tensor):
-        all_coef = all_coef.detach().cpu().numpy()
-
-    # —— 若 infer_charges 只返回一维 (N,) 电荷值 → 升成 (N,1)
-    if all_coef.ndim == 1:
-        all_coef = all_coef.reshape(-1, 1)
-
-    # 3️⃣ 统计各元素原子数
-    struct = Poscar.from_file(str(poscar_path)).structure
-    at_C = struct.species.count("C")
-    at_H = struct.species.count("H")
-    at_N = struct.species.count("N")
-    at_O = struct.species.count("O")
-    total_atoms = at_C + at_H + at_N + at_O
-
-    if all_coef.shape[0] != total_atoms:
-        raise ValueError(
-            f"{base_dir}: 系数行数 {all_coef.shape[0]} ≠ 原子总数 {total_atoms}"
-        )
-
-    # 4️⃣ 拆分 & 保存
-    i1 = at_C
-    i2 = i1 + at_H
-    i3 = i2 + at_N
-    coef_split = {
-        "C": all_coef[0:i1, :],
-        "H": all_coef[i1:i2, :],
-        "N": all_coef[i2:i3, :],
-        "O": all_coef[i3:total_atoms, :],
-    }
-
-    for elem, mat in coef_split.items():
-        # fp_chg_norm 期望 1-D (P,)；若只有 1 列则压扁
-        if mat.ndim == 2 and mat.shape[1] == 1:
-            mat_to_save = mat[:, 0].astype(np.float32)
-        else:
-            mat_to_save = mat.astype(np.float32)
-        np.save(str(base_dir / f"Coef_{elem}.npy"), mat_to_save)
-
-def parse_args():
-    parser = argparse.ArgumentParser(prog="dftpy", description="PyTorch-based ML-DFT: charge, energy, DOS")
-    subparsers = parser.add_subparsers(dest="mode", required=True)
-
-    # ========= “train” 子命令 ==========
-    train_parser = subparsers.add_parser("train", help="Train models: chg/energy/dos/all")
-    train_parser.add_argument("--task", required=True, choices=["chg", "energy", "dos", "all"])
-    train_parser.add_argument("--train-list", dest="train_list", type=str, required=True,
-                              help="Train CSV, 列名为 files")
-    train_parser.add_argument("--val-list", dest="val_list", type=str, required=True,
-                              help="Val   CSV, 列名为 files")
-    train_parser.add_argument("--epochs", type=int, default=100)
-    train_parser.add_argument("--batch-size", dest="batch_size", type=int, default=64)
-    train_parser.add_argument("--learning-rate", dest="learning_rate", type=float, default=1e-4)
-    train_parser.add_argument("--patience", type=int, default=20)
-    train_parser.add_argument("--grid-spacing", dest="grid_spacing", type=float, default=1.0)
-    train_parser.add_argument("--cut-off-rad", dest="cut_off_rad", type=float, default=6.0)
-    train_parser.add_argument("--widest-gaussian", dest="widest_gaussian", type=float, default=2.0)
-    train_parser.add_argument("--narrowest-gaussian", dest="narrowest_gaussian", type=float, default=0.5)
-    train_parser.add_argument("--num-gamma", dest="num_gamma", type=int, default=10)
-    train_parser.add_argument("--padding-multiplier", dest="padding_multiplier", type=float, default=1.0)
-
-    # ========= “infer” 子命令 ==========
-    infer_parser = subparsers.add_parser("infer", help="Infer on new structures")
-    infer_parser.add_argument("--infer-list", dest="infer_list", type=str, required=True,
-                              help="Predict CSV, 列名为 file_loc_test")
-    infer_parser.add_argument("--output-dir", dest="output_dir", type=str, default="results")
-    infer_parser.add_argument("--predict-chg", dest="predict_chg", action="store_true")
-    infer_parser.add_argument("--predict-energy", dest="predict_energy", action="store_true")
-    infer_parser.add_argument("--predict-dos", dest="predict_dos", action="store_true")
-    infer_parser.add_argument("--grid-spacing", dest="grid_spacing", type=float, default=1.0)
-    infer_parser.add_argument("--cut-off-rad", dest="cut_off_rad", type=float, default=6.0)
-    infer_parser.add_argument("--widest-gaussian", dest="widest_gaussian", type=float, default=2.0)
-    infer_parser.add_argument("--narrowest-gaussian", dest="narrowest_gaussian", type=float, default=0.5)
-    infer_parser.add_argument("--num-gamma", dest="num_gamma", type=int, default=10)
-    infer_parser.add_argument("--padding-multiplier", dest="padding_multiplier", type=float, default=1.0)
-    infer_parser.add_argument("--plot-dos", dest="plot_dos", action="store_true")
-
-    return parser.parse_args()
+def _positive_int(value):
+    result = int(value)
+    if result < 1:
+        raise argparse.ArgumentTypeError("Must be a positive integer.")
+    return result
 
 
-def main():
-    silence_deprecation_warnings()
-    args = parse_args()
+def _positive_float(value):
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("Must be positive and finite.")
+    return result
 
-    if args.mode == "train":
-        # ─── 1) 读取 CSV，得到文件夹列表 ───
-        train_folders = read_file_list(args.train_list, col="files")
-        val_folders = read_file_list(args.val_list, col="files")
 
-        # ─── 2) 计算 padding_size: max_atom_count * padding_multiplier ───
-        max_train = get_max_atom_count(train_folders)
-        max_val = get_max_atom_count(val_folders)
-        padding_size = int(max(max_train, max_val) * args.padding_multiplier)
-        if padding_size < 1:
-            raise ValueError("Computed padding_size < 1; 请检查输入文件或 padding_multiplier。")
+def _fingerprint_arguments(parser):
+    for name, value in FINGERPRINT_DEFAULTS.items():
+        value_type = _positive_int if name == "num_gamma" else _positive_float
+        parser.add_argument("--" + name.replace("_", "-"), type=value_type, default=value)
+    parser.add_argument("--padding-multiplier", type=_positive_float, default=1.0)
+    parser.add_argument("--scaler-dir", type=Path,
+                        help="Directory containing Scale_model_C/H/N/O.joblib.")
 
-        # ─── 3) 依次训练 ───
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(prog="dftpy", description=__doc__)
+    commands = parser.add_subparsers(dest="mode", required=True)
+    check = commands.add_parser("check-data", help="Check input file paths without model dependencies.")
+    check.add_argument("--list", dest="file_list", required=True, type=Path)
+    check.add_argument("--column", default="files")
+    check.add_argument("--task", choices=("structure", "chg", "energy", "dos", "all"), default="structure")
+
+    train = commands.add_parser("train", help="Train charge, energy, or DOS models.")
+    train.add_argument("--task", required=True, choices=("chg", "energy", "dos", "all"))
+    train.add_argument("--train-list", required=True, type=Path)
+    train.add_argument("--val-list", required=True, type=Path)
+    train.add_argument("--output-dir", type=Path, default=Path("runs/train"))
+    train.add_argument("--epochs", type=_positive_int, default=100)
+    train.add_argument("--batch-size", type=_positive_int, default=64)
+    train.add_argument("--learning-rate", type=_positive_float, default=1e-4)
+    train.add_argument("--patience", type=_positive_int, default=20)
+    _fingerprint_arguments(train)
+
+    infer = commands.add_parser("infer", help="Predict using existing trained checkpoints.")
+    infer.add_argument("--infer-list", required=True, type=Path)
+    infer.add_argument("--output-dir", type=Path, default=Path("results"))
+    infer.add_argument("--predict-chg", action="store_true")
+    infer.add_argument("--predict-energy", action="store_true")
+    infer.add_argument("--predict-dos", action="store_true")
+    infer.add_argument("--chg-checkpoint", type=Path, default=Path("best_chg.pth"))
+    infer.add_argument("--energy-checkpoint", type=Path, default=Path("newEmodel.pth"))
+    infer.add_argument("--dos-checkpoint", type=Path, default=Path("best_dos.pth"))
+    infer.add_argument("--plot-dos", action="store_true")
+    _fingerprint_arguments(infer)
+
+    args = parser.parse_args(argv)
+    if args.mode != "check-data":
+        if args.padding_multiplier < 1:
+            parser.error("padding-multiplier must be at least 1.")
+        if args.narrowest_gaussian > args.widest_gaussian:
+            parser.error("narrowest-gaussian must not exceed widest-gaussian.")
+    if args.mode == "infer" and not any((args.predict_chg, args.predict_energy, args.predict_dos)):
+        parser.error("Select at least one --predict-* option.")
+    return args
+
+
+def _folders(csv_path, column):
+    return [str(structure_folder(path)) for path in read_file_list(csv_path, column)]
+
+
+def check_inputs(folders, task):
+    required = []
+    if task in ("chg", "all"):
+        required.extend(f"Coef_{element}.npy" for element in "CHNO")
+    if task in ("energy", "all"):
+        required.extend(("energy", "forces", "stress"))
+    if task in ("dos", "all"):
+        required.extend(("dos", "VB_CB"))
+    require_files(folders, required)
+
+
+@contextmanager
+def _output_directory(path, args):
+    previous = Path.cwd()
+    target = path.resolve()
+    target.mkdir(parents=True, exist_ok=False)
+    with (target / "run.json").open("w", encoding="utf-8") as stream:
+        json.dump(vars(args), stream, indent=2, default=str)
+        stream.write("\n")
+    try:
+        os.chdir(target)
+        yield target
+    finally:
+        os.chdir(previous)
+
+
+def _train(args):
+    train = _folders(args.train_list, "files")
+    validation = _folders(args.val_list, "files")
+    if set(train) & set(validation):
+        raise ValueError("Training and validation lists contain overlapping structures.")
+    check_inputs(train + validation, args.task)
+    from .data_io import get_max_atom_count
+    padding = math.ceil(get_max_atom_count(train + validation) * args.padding_multiplier)
+    with _output_directory(args.output_dir, args) as output:
         if args.task in ("chg", "all"):
-            print("[INFO] 训练电荷模型 …")
-            train_chg_model(train_folders, val_folders, padding_size, args)
-
+            from .chg import train_chg_model
+            train_chg_model(train, validation, padding, args)
         if args.task in ("energy", "all"):
-            print("[INFO] 训练能量模型 …")
-            # 必须先加载电荷模型
-            chg_ckpt = "best_chg.pth"
-            try:
-                chg_model = load_pretrained_chg_model(chg_ckpt, padding_size)
-            except FileNotFoundError as e:
-                print(f"[ERROR] 无法加载电荷模型权重: {e}")
-                return
-            train_energy_model(train_folders, val_folders, chg_model, padding_size, args)
-
+            from .energy import train_energy_model
+            train_energy_model(train, validation, None, padding, args)
         if args.task in ("dos", "all"):
-            print("[INFO] 训练 DOS 模型 …")
-            # 1) 先加载电荷模型
-            chg_ckpt = "best_chg.pth"
-            try:
-                chg_model = load_pretrained_chg_model(chg_ckpt, padding_size)
-            except FileNotFoundError as e:
-                print(f"[ERROR] 无法加载电荷模型权重: {e}")
-                return
+            from .dos import train_dos_model
+            train_dos_model(train, validation, padding, args)
+    print(f"Run files: {output}")
 
-            # 2) → 【新增】为 train_folders 和 val_folders 分别生成 Coef_*.npy，写回各自文件夹
-            print("[INFO] 生成并保存 Coef_*.npy 数据，以备 DOS 训练使用 …")
-            for folder in train_folders + val_folders:
-                _save_coef_npy_for_folder(folder, chg_model, padding_size, args)
 
-            # 3) 最后再调用 train_dos_model（dos.py 会去各个 folder 里找 Coef_*.npy）
-            train_dos_model(train_folders, val_folders, padding_size, args)
+def _infer(args):
+    folders = _folders(args.infer_list, "file_loc_test")
+    for task in ("chg", "energy", "dos"):
+        if getattr(args, f"predict_{task}"):
+            checkpoint = getattr(args, f"{task}_checkpoint").resolve(strict=True)
+            setattr(args, f"{task}_checkpoint", checkpoint)
+    from .data_io import get_max_atom_count, save_charges, save_dos, save_energy
+    padding = math.ceil(get_max_atom_count(folders) * args.padding_multiplier)
+    chg_model = energy_model = dos_model = None
+    if args.predict_chg:
+        from .chg import infer_charges, load_pretrained_chg_model
+        chg_model = load_pretrained_chg_model(args.chg_checkpoint, padding)
+    if args.predict_energy:
+        from .energy import infer_energy, load_pretrained_energy_model
+        energy_model = load_pretrained_energy_model(args.energy_checkpoint, padding, 369, 369, 369, 369)
+    if args.predict_dos:
+        from .dos import infer_dos, load_pretrained_dos_model
+        dos_model = load_pretrained_dos_model(args.dos_checkpoint, padding)
 
-    elif args.mode == "infer":
-        # ─── 1) 读取 CSV，得到要预测的文件夹列表 ───
-        infer_folders = read_file_list(args.infer_list, col="file_loc_test")
-        if not infer_folders:
-            print("[WARN] infer-list 为空，没有任何文件夹可预测。")
-            return
-
-        os.makedirs(args.output_dir, exist_ok=True)
-
-        # 计算 padding_size 以供所有模型使用
-        max_count = get_max_atom_count(infer_folders)
-        padding_size = int(max_count * args.padding_multiplier)
-        if padding_size < 1:
-            raise ValueError("Computed padding_size < 1; 请检查输入文件或 padding_multiplier。")
-
-        chg_model = None
-        energy_model = None
-        dos_model = None
-
-        # ─── 2) 加载电荷模型（如需要） ───
-        if args.predict_chg:
-            chg_ckpt = "best_chg.pth"
-            try:
-                chg_model = load_pretrained_chg_model(chg_ckpt, padding_size)
-            except FileNotFoundError as e:
-                print(f"[ERROR] 无法加载电荷模型权重: {e}")
-                return
-
-        # ─── 3) 加载能量模型（如需） ───
-        if args.predict_energy:
-            energy_ckpt = "newEmodel.pth"
-            fingerprint_dim = 360
-            basis_dim = 9
-            dim_C = fingerprint_dim + basis_dim
-            dim_H = fingerprint_dim + basis_dim
-            dim_N = fingerprint_dim + basis_dim
-            dim_O = fingerprint_dim + basis_dim
-
-            try:
-                energy_model = load_pretrained_energy_model(
-                    energy_ckpt,
-                    padding_size=int(get_max_atom_count(infer_folders) * args.padding_multiplier),
-                    dim_C=dim_C, dim_H=dim_H, dim_N=dim_N, dim_O=dim_O
-                )
-            except FileNotFoundError as e:
-                print(f"[ERROR] 无法加载能量模型权重: {e}")
-                return
-
-        # ─── 4) 加载 DOS 模型（如需） ───
-        if args.predict_dos:
-            dos_ckpt = "best_dos.pth"
-            try:
-                dos_model = load_pretrained_dos_model(
-                    dos_ckpt,
-                    padding_size=int(get_max_atom_count(infer_folders) * args.padding_multiplier)
-                )
-            except FileNotFoundError as e:
-                print(f"[ERROR] 无法加载 DOS 模型权重: {e}")
-                return
-
-        # ─── 5) 循环对每个结构做预测并保存结果 ───
-        for folder in infer_folders:
-            print(f"[INFO] 处理 {folder} …")
-            pdbasename = os.path.basename(folder.rstrip("/"))
-
-            # 【电荷】
+    with _output_directory(args.output_dir, args) as output:
+        for index, folder in enumerate(folders, 1):
+            name = f"{index:04d}_{Path(folder).name}"
+            print(f"Predicting {folder}")
             if args.predict_chg:
-                try:
-                    chg_vals = infer_charges(
-                        folder,
-                        chg_model,
-                        int(get_max_atom_count(infer_folders) * args.padding_multiplier),
-                        args
-                    )
-                    save_charges(chg_vals, os.path.join(args.output_dir, f"charges_{pdbasename}.txt"))
-                except Exception as e:
-                    print(f"[WARN] 电荷预测失败 ({folder}): {e}")
-
-            # 【能量】
+                values = infer_charges(folder, chg_model, padding, args)
+                save_charges(values, str(output / f"charges_{name}.txt"))
             if args.predict_energy:
-                try:
-                    e_val, forces, stress = infer_energy(
-                        folder,
-                        chg_model,
-                        energy_model,
-                        int(get_max_atom_count(infer_folders) * args.padding_multiplier),
-                        args
-                    )
-                    save_energy(e_val, forces, stress, os.path.join(args.output_dir, f"energy_{pdbasename}.txt"))
-                except Exception as e:
-                    print(f"[WARN] 能量预测失败 ({folder}): {e}")
-
-            # 【DOS】
+                energy, forces, stress = infer_energy(folder, None, energy_model, padding, args)
+                save_energy(energy, forces, stress, str(output / f"energy_{name}.txt"), per_atom=True)
             if args.predict_dos:
-                try:
-                    energy_grid, dos_curve, vb, cb, bg, uncertainty = infer_dos(
-                        folder,
-                        chg_model,
-                        dos_model,
-                        int(get_max_atom_count(infer_folders) * args.padding_multiplier),
-                        args
-                    )
-                    save_dos(
-                        energy_grid, dos_curve, vb, cb, bg,
-                        os.path.join(args.output_dir, f"dos_{pdbasename}.txt")
-                    )
-                    if args.plot_dos:
-                        # 可选：如果在 utils 里实现了 plot_dos，就在此调用
-                        # from .utils import plot_dos
-                        # plot_dos(energy_grid, dos_curve, vb, cb, os.path.join(args.output_dir, f"dos_plot_{pdbasename}.png"))
-                        pass
-                except Exception as e:
-                    print(f"[WARN] DOS 预测失败 ({folder}): {e}")
+                grid, values, vb, cb, gap, _ = infer_dos(folder, None, dos_model, padding, args)
+                save_dos(grid, values, vb, cb, gap, str(output / f"dos_{name}.txt"))
+    print(f"Predictions: {output}")
 
-    else:
-        raise ValueError("Unknown mode. Choose from 'train' or 'infer'.")
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        if args.mode == "check-data":
+            folders = _folders(args.file_list, args.column)
+            check_inputs(folders, args.task)
+            print(f"Checked {len(folders)} structures for task '{args.task}'.")
+            return
+        for key, value in vars(args).items():
+            if isinstance(value, Path):
+                setattr(args, key, value.expanduser().resolve())
+        if args.mode == "train":
+            _train(args)
+        else:
+            _infer(args)
+    except (FileNotFoundError, FileExistsError, ValueError) as error:
+        raise SystemExit(f"Error: {error}") from error
 
 
 if __name__ == "__main__":

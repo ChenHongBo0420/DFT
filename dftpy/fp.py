@@ -23,7 +23,7 @@ from typing  import List, Tuple
 import numpy as np
 from joblib import load
 from pymatgen.core             import Structure
-from pymatgen.io.vasp.outputs  import Poscar
+from pymatgen.io.vasp.inputs import Poscar
 
 # --------------------------------------------------------------------- public
 DOS_POINTS: int = 341

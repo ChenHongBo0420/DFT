@@ -11,7 +11,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from pymatgen.io.vasp.outputs import Poscar, Chgcar
+from pymatgen.io.vasp.inputs import Poscar
+from pymatgen.io.vasp.outputs import Chgcar
+from .paths import find_poscar
 from torch.utils.data import Dataset, DataLoader
 
 from .fp import fp_atom
@@ -78,7 +80,7 @@ def load_pretrained_chg_model(path: str, padding_size: int):
     if not Path(path).is_file():
         raise FileNotFoundError(f"ChargeModel 权重不存在: {path}")
     m = init_chgmod(padding_size)
-    m.load_state_dict(torch.load(path, map_location=DEVICE))
+    m.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
     m.eval()
     return m
 
@@ -129,7 +131,7 @@ def _prepare(
         XNs.append(_fix_feat(X3))
         XOs.append(_fix_feat(X4))
 
-        load = lambda n: np.load(Path(fld) / n) if (Path(fld) / n).is_file() else np.empty((0, 1))
+        load = lambda n: np.load(Path(fld) / n, allow_pickle=False)
         CCs.append(_pad_coef(load("Coef_C.npy"), 340))
         CHs.append(_pad_coef(load("Coef_H.npy"), 208))
         CNs.append(_pad_coef(load("Coef_N.npy"), 340))
@@ -201,26 +203,17 @@ def infer_charges(folder: str, chg_model: ChargeModel, padding_size: int, args):
     folder: 既可以是“包含 POSCAR 文件的目录”，也可以直接是 POSCAR 文件本身
     """
     # ----- 1) 先定位 POSCAR 文件的真实路径 -----
-    p = Path(folder)
-    if p.is_file() and p.name.upper() == "POSCAR":
-        # 如果 folder 本身就是一个“POSCAR 文件路径”
-        poscar_path = p
-    else:
-        # 否则 folder 应当是包含 POSCAR 的目录
-        poscar_path = p / "POSCAR"
-    if not poscar_path.is_file():
-        raise FileNotFoundError(f"无法找到 POSCAR: {poscar_path}")
+    poscar_path = find_poscar(folder)
 
     # ----- 2) 从 POSCAR 里读结构 -----
     struct = Poscar.from_file(str(poscar_path)).structure
 
     # ----- 3) 计算指纹 & pad -----
-    dset, basis, *_ = fp_atom(
+    dset, basis, _, _, ats = fp_atom(
         struct,
         args.grid_spacing, args.cut_off_rad,
         args.widest_gaussian, args.narrowest_gaussian, args.num_gamma,
     )
-    ats = [struct.species.count(e) for e in ("C", "H", "N", "O")]
     X1, X2, X3, X4, *_ = chg_data(dset, basis, *ats, padding_size)
 
     # ----- 4) 转为 Tensor 并送进模型 -----

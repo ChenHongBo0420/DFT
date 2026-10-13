@@ -1,0 +1,11 @@
+include README.md LICENSE inp_params.py
+include CITATION.cff
+recursive-include docs *.md
+recursive-include dftpy/scalers *.joblib *.md
+recursive-include scripts *.py
+recursive-include tests *.py
+recursive-include Colab *.ipynb *.md
+recursive-include database POSCAR energy forces stress dos VB_CB *.md
+recursive-include DFT_CSVs *.csv
+recursive-include DFT_CSVs_v2 *.csv
+global-exclude __pycache__ *.py[cod]

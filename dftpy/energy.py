@@ -9,7 +9,8 @@ from torch.utils.data import Dataset, DataLoader
 from .fp import fp_atom, fp_chg_norm, fp_norm
 from .data_io import get_efp_data, pad_efp_data
 from pathlib import Path
-from pymatgen.io.vasp.outputs import Poscar
+from pymatgen.io.vasp.inputs import Poscar
+from .paths import scaler_paths as get_scaler_paths
 
 # dftpy/energy.py 顶部
 __all__ = [
@@ -219,7 +220,7 @@ def model_weights(train_e: bool, new_weights_e: bool, model_E: nn.Module, checkp
         path = checkpoint_path
 
     if os.path.exists(path):
-        model_E.load_state_dict(torch.load(path, map_location=DEVICE))
+        model_E.load_state_dict(torch.load(path, map_location=DEVICE, weights_only=True))
     else:
         raise FileNotFoundError(f"无法找到模型权重文件: {path}")
 
@@ -394,7 +395,8 @@ def retrain_emodel(
     dim_H: int = 577,
     dim_N: int = 709,
     dim_O: int = 709,
-    checkpoint_path: str = "best_emodel.pth"
+    checkpoint_path: str = "best_emodel.pth",
+    learning_rate: float = 1e-4,
 ):
     """
     在 PyTorch 中训练能量模型，流程：
@@ -425,7 +427,7 @@ def retrain_emodel(
     criterion_force  = masked_mse_loss
     criterion_press  = nn.MSELoss()
 
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     best_val_loss = float("inf")
     best_epoch = 0
@@ -566,7 +568,7 @@ def load_pretrained_energy_model(checkpoint_path: str, padding_size: int,
     加载一个训练好的能量模型并返回。
     """
     if os.path.exists(checkpoint_path):
-        model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE))
+        model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE, weights_only=True))
         model.eval()
         return model
     else:
@@ -576,97 +578,40 @@ def load_pretrained_energy_model(checkpoint_path: str, padding_size: int,
 # ------------------------------------------------------------------------------
 # Infer interface for CLI: infer_energy
 # ------------------------------------------------------------------------------
-def infer_energy(
-    folder: str,
-    chg_model,    # 不直接使用，可传 None
-    energy_model: nn.Module,
-    padding_size: int,
-    args
-):
+def infer_energy(folder, chg_model, energy_model, padding_size, args):
+    """Use the same fingerprint, scaler, and basis inputs as energy training.
+
+    The legacy chg_model argument is retained for caller compatibility.
     """
-    CLI 中调用的推理函数：
-      - folder: 单个结构文件夹路径
-      - chg_model: 电荷模型（这里不使用，因为推理前已经在 fp_chg_norm 里得到所有必要的特征）
-      - energy_model: 已加载的 PyTorch 能量模型
-      - padding_size: 填充尺寸
-      - args: 命令行参数（用于读取 grid_spacing, cut_off_rad, 等）
+    from .data_io import chg_data, read_poscar
+    from .paths import scaler_paths
 
-    返回：
-      - total_energy: float
-      - forces: np.ndarray, shape=(num_atoms, 3) 总力按原子顺序排列
-      - stress: np.ndarray, shape=(6,)
-    """
-    # 1. 读取 POSCAR，生成指纹 + 基函数 + 掩码
-    poscar = Poscar.from_file(os.path.join(folder, "POSCAR"))
-    struct = poscar.structure
-
-    # 调用 fp.py 中的 fp_atom + 后续分割逻辑
-    from .fp import fp_atom, fp_chg_norm, fp_norm
-    # 1.1 生成纯指纹和基函数
-    dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(
-        struct,
-        args.grid_spacing,
-        args.cut_off_rad,
-        args.widest_gaussian,
-        args.narrowest_gaussian,
-        args.num_gamma
+    structure = read_poscar(folder)
+    features, basis, _, count, counts = fp_atom(
+        structure, args.grid_spacing, args.cut_off_rad,
+        args.widest_gaussian, args.narrowest_gaussian, args.num_gamma,
     )
-    # at_elem = [nC, nH, nN, nO]
-    # 创建 padding 到 padding_size
-    # 拆分 per-element 再 pad
-    from .data_io import chg_data
-    X_3D1, X_3D2, X_3D3, X_3D4, basis1, basis2, basis3, basis4, C_m, H_m, N_m, O_m = chg_data(
-        dset, basis_mat, at_elem[0], at_elem[1], at_elem[2], at_elem[3], padding_size
-    )
-
-    # 1.2 调用电荷模型预测电荷系数
-    Coef1, Coef2, Coef3, Coef4, _, _, _, _ = chg_model.predict(  # 假设 chg_model 兼容此接口
-        X_3D1, X_3D2, X_3D3, X_3D4, at_elem[0], at_elem[1], at_elem[2], at_elem[3], sites_elem, chg_model, at_elem
-    )
-    # 用 fp_chg_norm 得到带电荷维的指纹
-    scaler_paths = (
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_C.joblib"),
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_H.joblib"),
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_N.joblib"),
-        os.path.join(os.path.dirname(__file__), "scalers/Scale_model_O.joblib"),
-    )
-    X_C, X_H, X_N, X_O = fp_chg_norm(
-        Coef1, Coef2, Coef3, Coef4,
-        X_3D1, X_3D2, X_3D3, X_3D4,
-        padding_size,
-        scaler_paths
-    )
-
-    # 1.3 最后做一次归一化
-    X_C, X_H, X_N, X_O = fp_norm(X_C, X_H, X_N, X_O, padding_size, scaler_paths)
-
-    # 2. 调用 energy_predict
-    # basis1~4, C_m~O_m 都已是 NumPy，num_atoms 传 (1,1)
-    num_atoms_np = np.array([[num_atoms]], dtype=np.float32)
-    energy, fC, fH, fN, fO, stress = energy_predict(
-        X_C, X_H, X_N, X_O,
-        basis1, basis2, basis3, basis4,
-        C_m, H_m, N_m, O_m,
-        num_atoms_np,
-        energy_model,
-        args.train_e, args.new_weights_e,
-        os.path.join(os.path.dirname(__file__), "../Trained_models/weights_EFP.pth")
-    )
-
-    # 3. 合并 forces 按原子顺序：C->H->N->O
-    forces_list = []
-    if at_elem[0] > 0:
-        forces_list.append(fC[: at_elem[0], :])
-    if at_elem[1] > 0:
-        forces_list.append(fH[: at_elem[1], :])
-    if at_elem[2] > 0:
-        forces_list.append(fN[: at_elem[2], :])
-    if at_elem[3] > 0:
-        forces_list.append(fO[: at_elem[3], :])
-
-    forces = np.vstack(forces_list)  # shape=(num_atoms,3)
-
-    return energy, forces, stress
+    # Match the fixed-width feature representation used by energy training.
+    features = features[:, :360]
+    if features.shape[1] < 360:
+        features = np.pad(features, ((0, 0), (0, 360 - features.shape[1])))
+    packed = chg_data(features, basis, *counts, padding_size)
+    normalized = fp_norm(*packed[:4], padding_size,
+                         scaler_paths(getattr(args, "scaler_dir", None)))
+    device = next(energy_model.parameters()).device
+    inputs = [torch.as_tensor(np.concatenate((x, b), axis=-1),
+                              dtype=torch.float32, device=device)
+              for x, b in zip(normalized, packed[4:8])]
+    masks = [torch.as_tensor(mask, dtype=torch.float32, device=device)
+             for mask in packed[8:12]]
+    atoms = torch.tensor([[count]], dtype=torch.float32, device=device)
+    energy_model.eval()
+    with torch.no_grad():
+        energy, *other = energy_model(*inputs, atoms, *masks)
+    forces = np.concatenate([block[0, :n].cpu().numpy()
+                             for block, n in zip(other[:4], counts) if n], axis=0)
+    # Preserve the original negative, per-atom energy output convention.
+    return -energy.item(), forces, other[4][0].cpu().numpy()
 
 def train_energy_model(train_folders, val_folders, chg_model, padding_size, args):
     """
@@ -677,8 +622,8 @@ def train_energy_model(train_folders, val_folders, chg_model, padding_size, args
     """
 
     # ──── 1) 读入训练/验证数据 ────
-    ener_ref, forces_pre, press_ref, X_pre, basis_pre, X_at, X_el, X_elem = get_efp_data(train_folders)
-    ener_val, forces_val, press_val, X_val_pre, basis_val_pre, X_at_val, X_el_val, X_elem_val = get_efp_data(val_folders)
+    ener_ref, forces_pre, press_ref, X_pre, basis_pre, X_at, X_el, X_elem = get_efp_data(train_folders, args)
+    ener_val, forces_val, press_val, X_val_pre, basis_val_pre, X_at_val, X_el_val, X_elem_val = get_efp_data(val_folders, args)
 
     padding_size = int(padding_size)  # ensure int
 
@@ -694,13 +639,7 @@ def train_energy_model(train_folders, val_folders, chg_model, padding_size, args
     C_mV, H_mV, N_mV, O_mV = pad_efp_data(X_elem_val, X_val_pre, forces_val, basis_val_pre, padding_size)
 
     # ──── 3) 拼出四个 scaler_paths 的绝对路径 ────
-    base_dir = Path(__file__).parent  # dftpy/ 目录
-    scaler_paths = (
-        str(base_dir / "scalers" / "Scale_model_C.joblib"),
-        str(base_dir / "scalers" / "Scale_model_H.joblib"),
-        str(base_dir / "scalers" / "Scale_model_N.joblib"),
-        str(base_dir / "scalers" / "Scale_model_O.joblib"),
-    )
+    scaler_paths = get_scaler_paths(getattr(args, "scaler_dir", None))
 
     # 用 fp_norm 对 fingerprint 做 MaxAbsScaler 归一化
     X_C, X_H, X_N, X_O   = fp_norm(X_1, X_2, X_3, X_4, padding_size, scaler_paths)
@@ -743,7 +682,8 @@ def train_energy_model(train_folders, val_folders, chg_model, padding_size, args
         dim_N = dim_N,
         dim_O = dim_O,
 
-        checkpoint_path = "best_emodel.pth"
+        checkpoint_path = "best_emodel.pth",
+        learning_rate = args.learning_rate,
     )
 
     print("Energy model training done. Best weights saved as newEmodel.pth (in current working dir).")

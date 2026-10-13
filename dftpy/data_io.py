@@ -1,14 +1,4 @@
-"""
-dftpy/data_io.py
-================
-辅助 IO / 数据整理函数。
-
-仅做两点改动：
-1. `from .fp import fp_atom, fp_norm`  —— 解决 energy.py 等模块的 import Error
-2. 把这两个名字补进 `__all__`
-
-其余代码完全保持原项目逻辑。
-"""
+"""Reference-data loading, per-element padding, and prediction output helpers."""
 
 from __future__ import annotations
 
@@ -17,8 +7,9 @@ from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
-import pandas as pd
-from pymatgen.io.vasp.outputs import Poscar
+from pymatgen.io.vasp.inputs import Poscar
+from .paths import find_poscar, read_file_list
+from .config import FINGERPRINT_DEFAULTS
 
 # -----------------------------------------------------------------------------
 # 关键：re-export 指纹相关工具，供其它模块直接 import
@@ -26,11 +17,7 @@ from pymatgen.io.vasp.outputs import Poscar
 from .fp import fp_atom, fp_norm        # ⭐️ 新增
 # ----------------- 为兼容旧代码而做的 *唯一* 包装 ----------------- #
 # CLI 默认超参数保持和 chg.py 里一致；需要别的值就显式传 fp_atom
-_DEFAULTS = dict(grid_spacing=0.7,
-                 cut_off_rad=5.0,
-                 widest_gaussian=6.0,
-                 narrowest_gaussian=0.5,
-                 num_gamma=18)
+_DEFAULTS = FINGERPRINT_DEFAULTS
 
 def _fp_atom_default(struct):
     """data_io 内部统一走这个包装，省得每处都改 6 个参数"""
@@ -45,22 +32,9 @@ def _fp_atom_default(struct):
 elec_dict = {6: 4, 1: 1, 7: 5, 8: 6}
 
 
-def read_file_list(csv_path: str, col: str):
-    df = pd.read_csv(csv_path)
-    if col not in df.columns:
-        raise KeyError(f"CSV 中未找到列 {col}")
-    return df[col].dropna().astype(str).tolist()
-
-
 def read_poscar(folder: str):
-    """优先把 folder/POSCAR 当作文件，如果不存在，再看 folder/POSCAR/POSCAR"""
-    base = Path(folder) / "POSCAR"
-    if base.is_file():
-        return Poscar.from_file(base).structure
-    nested = base / "POSCAR"
-    if nested.is_file():
-        return Poscar.from_file(nested).structure
-    raise FileNotFoundError(f"在目录 {folder} 下无法找到 POSCAR 文件")
+    """Read a structure using the shared POSCAR path conventions."""
+    return Poscar.from_file(find_poscar(folder)).structure
 
 
 
@@ -68,9 +42,10 @@ def save_charges(chg_vals: np.ndarray, filepath: str):
     np.savetxt(filepath, chg_vals, fmt="%.6f")
 
 
-def save_energy(energy: float, forces: np.ndarray, stress: np.ndarray, filepath: str):
-    with open(filepath, "w") as f:
-        f.write(f"Total potential energy (eV): {energy:.6f}\n\n")
+def save_energy(energy: float, forces: np.ndarray, stress: np.ndarray, filepath: str, per_atom=False):
+    with open(filepath, "w", encoding="utf-8") as f:
+        label = "Predicted energy per atom (eV/atom)" if per_atom else "Total potential energy (eV)"
+        f.write(f"{label}: {energy:.6f}\n\n")
         f.write("Forces (eV/Å):\n")
         np.savetxt(f, forces, fmt="%.6f")
         f.write("\nStress tensor components (kB):\n")
@@ -97,18 +72,7 @@ def get_max_atom_count(folders: List[str]) -> int:
     """
     max_count = 0
     for f in folders:
-        # 先尝试把 f/POSCAR 当作文件
-        poscar_candidate = os.path.join(f, "POSCAR")
-        if os.path.isfile(poscar_candidate):
-            poscar_file = poscar_candidate
-        else:
-            # 如果 f/POSCAR 不是文件，再尝试 f/POSCAR/POSCAR
-            nested = os.path.join(poscar_candidate, "POSCAR")
-            if os.path.isfile(nested):
-                poscar_file = nested
-            else:
-                raise FileNotFoundError(f"在目录 {f} 下未找到 POSCAR 文件")
-        struct = Poscar.from_file(poscar_file).structure
+        struct = read_poscar(f)
         if struct.num_sites > max_count:
             max_count = struct.num_sites
     return max_count
@@ -126,7 +90,7 @@ def pad_to(arr: np.ndarray, target_rows: int, pad_value=0.0):
 
 # ------------------------- 数据读取 / 预处理主流程 ---------------------------
 def get_def_data(folder: str):
-    poscar_file = Path(folder).joinpath("POSCAR")
+    poscar_file = find_poscar(folder)
     poscar_data = Poscar.from_file(poscar_file)
     supercell = poscar_data.structure
     vol = supercell.volume
@@ -152,6 +116,9 @@ def get_fp_all(at_elem: list, X_tot: np.ndarray, padding_size: int):
 def get_fp_basis_F(at_elem: list, X_tot: np.ndarray,
                    forces_data: np.ndarray, base_mat: np.ndarray,
                    padding_size: int):
+    X_tot = X_tot[:, :360]
+    if X_tot.shape[1] < 360:
+        X_tot = np.pad(X_tot, ((0, 0), (0, 360 - X_tot.shape[1])))
     i1, i2, i3, i4 = at_elem
     offsets = [0, i1, i1 + i2, i1 + i2 + i3]
     X_npad, basis_npad, forces_npad = [], [], []
@@ -274,7 +241,7 @@ def get_all_data(data_list: list):
 
 
 # ==== get_efp_data ==========================================================
-def get_efp_data(data_list: list):
+def get_efp_data(data_list: list, fp_args=None):
     from .energy import e_train   # 延迟导入避免循环依赖
     ener_list, forces_pre_list, press_list = [], [], []
     X_pre_list, basis_pre_list, At_list, El_list, X_at_elem = [], [], [], [], []
@@ -285,7 +252,12 @@ def get_efp_data(data_list: list):
 
         # dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(
         #     poscar_data, supercell, elems_list)
-        dset, basis_mat, sites_elem, num_atoms, at_elem = _fp_atom_default(supercell)
+        if fp_args is None:
+            dset, basis_mat, sites_elem, num_atoms, at_elem = _fp_atom_default(supercell)
+        else:
+            dset, basis_mat, sites_elem, num_atoms, at_elem = fp_atom(
+                supercell, **{key: getattr(fp_args, key) for key in FINGERPRINT_DEFAULTS}
+            )
         At_list.append([num_atoms])
         X_pre_list.append(dset.copy())
         basis_pre_list.append(basis_mat.copy())
@@ -331,7 +303,6 @@ def pad_dat(X_at_elem: np.ndarray, X_pre_list: list, padding_size: int):
 
 
 # ==== pad_efp_data ==========================================================
-import numpy as np
 
 def pad_efp_data(
     X_at_elem: np.ndarray,

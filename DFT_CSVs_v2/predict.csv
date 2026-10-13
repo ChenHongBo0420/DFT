@@ -1,5 +1,5 @@
 file_loc_test
-/content/DFT/database/chains/R1000001
-/content/DFT/database/chains/R1000043
-/content/DFT/database/crystals/R1000003
-/content/DFT/database/crystals/R1002525
+../database/chains/R1000001
+../database/chains/R1000043
+../database/crystals/R1000003
+../database/crystals/R1002525

@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "Please cite this repository when using the code."
+type: software
+title: "ML-DFT: PyTorch Research Code for Atom-Centered Property Prediction"
+authors:
+  - family-names: Chen
+    given-names: Hongbo
+repository-code: "https://github.com/ChenHongBo0420/DFT"
+license: MIT
